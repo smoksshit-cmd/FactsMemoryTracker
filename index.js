@@ -1112,5 +1112,4 @@ ${lines.join('\n')}
       console.error('[FMT] init failed', e);
     }
   });
-
-})();
+})
