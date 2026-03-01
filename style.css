@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════
    Facts Memory Tracker — style.css
-   v1.0.0
+   v1.1.0
    ═══════════════════════════════════════════════════════════════ */
 
 /* ─── FAB (floating action button) ─────────────────────────────── */
@@ -9,17 +9,25 @@
   position: fixed;
   z-index: 9500;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 2px;
   user-select: none;
   touch-action: none;
-  filter: drop-shadow(0 3px 12px rgba(0,0,0,0.55));
-  transition: filter 0.15s;
+  /* Полупрозрачный чтобы не мешал — ярче при наведении */
+  opacity: 0.45;
+  transition: opacity 0.2s, filter 0.2s;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4));
+}
+
+#fmt_fab:hover,
+#fmt_fab:focus-within {
+  opacity: 1;
+  filter: drop-shadow(0 4px 16px rgba(0,0,0,0.65));
 }
 
 #fmt_fab.fmt-dragging {
+  opacity: 1;
   filter: drop-shadow(0 6px 20px rgba(0,0,0,0.7));
-  opacity: 0.9;
 }
 
 #fmt_fab_btn {
@@ -27,32 +35,32 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 64px;
-  height: 58px;
-  border-radius: 16px;
-  border: none;
+  width: 52px;
+  height: 48px;
+  border-radius: 14px;
+  border: 1px solid rgba(100,140,220,0.3);
   background: linear-gradient(145deg, #2b3a55, #1e2a42);
   color: #fff;
   cursor: pointer;
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1;
   padding: 0;
   gap: 2px;
-  transition: background 0.15s, transform 0.12s;
-  border: 1px solid rgba(100,140,220,0.25);
+  /* Масштаб применяется через JS applyFabScale() */
+  transform-origin: top left;
+  transition: background 0.15s;
 }
 
 #fmt_fab_btn:hover {
   background: linear-gradient(145deg, #3a4e78, #2b3a5a);
-  transform: scale(1.06);
 }
 
 #fmt_fab_btn:active {
-  transform: scale(0.97);
+  opacity: 0.85;
 }
 
 .fmt-mini {
-  font-size: 11px;
+  font-size: 10px;
   opacity: 0.75;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -60,36 +68,26 @@
 }
 
 #fmt_fab_hide {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   border: none;
-  background: rgba(255,255,255,0.1);
-  color: rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.4);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  align-self: flex-start;
-  margin-top: 2px;
+  flex-shrink: 0;
+  margin-top: 1px;
   transition: background 0.15s, color 0.15s;
 }
 
 #fmt_fab_hide:hover {
   background: rgba(220,80,80,0.7);
   color: #fff;
-}
-
-/* Tablet */
-@media (max-width: 1024px) and (min-width: 481px) {
-  #fmt_fab_btn { width: 66px; height: 62px; font-size: 24px; border-radius: 18px; }
-}
-
-/* Mobile */
-@media (max-width: 480px) {
-  #fmt_fab_btn { width: 60px; height: 58px; font-size: 22px; border-radius: 15px; }
 }
 
 /* ─── Overlay ────────────────────────────────────────────────────── */
@@ -278,12 +276,32 @@
   background: rgba(60,110,200,0.45);
 }
 
-/* Category sections */
-.fmt-cat-section {
-  margin-bottom: 12px;
+/* Fact disabled state */
+.fmt-fact-disabled {
+  opacity: 0.38;
+}
+
+.fmt-fact-disabled .fmt-fact-text {
+  text-decoration: line-through;
+  color: rgba(180,200,240,0.5);
+}
+
+/* Filter / collapse hidden */
+.fmt-row-hidden {
+  display: none !important;
+}
+
+/* Category collapse */
+.fmt-cat-body {
+  overflow: hidden;
+}
+
+.fmt-cat-body.fmt-cat-collapsed {
+  display: none;
 }
 
 .fmt-cat-header {
+  cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -292,9 +310,24 @@
   color: rgba(160,190,255,0.8);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  padding: 4px 2px 6px;
+  padding: 4px 4px 6px;
   border-bottom: 1px solid rgba(100,160,255,0.12);
   margin-bottom: 5px;
+  user-select: none;
+  border-radius: 4px;
+  transition: background 0.12s;
+}
+
+.fmt-cat-header:hover {
+  background: rgba(100,160,255,0.07);
+}
+
+.fmt-cat-chevron {
+  font-size: 10px;
+  opacity: 0.6;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 .fmt-cat-count {
@@ -304,19 +337,54 @@
   padding: 1px 6px;
   font-weight: 600;
   margin-left: auto;
+  white-space: nowrap;
 }
+
+.fmt-cat-dis {
+  color: rgba(255,180,100,0.7);
+  font-weight: 400;
+  font-size: 9px;
+}
+
+/* Toggle button */
+.fmt-toggle-btn {
+  background: none;
+  border: none;
+  color: rgba(180,200,240,0);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.fmt-fact-row:hover .fmt-toggle-btn {
+  color: rgba(150,190,255,0.5);
+}
+
+.fmt-toggle-btn:hover {
+  background: rgba(100,160,255,0.15) !important;
+  color: #90b8f8 !important;
+}
+
+.fmt-fact-disabled .fmt-toggle-btn {
+  color: rgba(100,200,120,0.6) !important;
+}
+
 
 /* Fact row */
 .fmt-fact-row {
   display: flex;
   align-items: flex-start;
-  gap: 7px;
-  padding: 7px 8px;
+  gap: 6px;
+  padding: 6px 8px;
   border-radius: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   background: rgba(255,255,255,0.03);
   border: 1px solid rgba(100,160,255,0.08);
-  transition: background 0.12s;
+  transition: background 0.12s, opacity 0.15s;
 }
 
 .fmt-fact-row:hover {
