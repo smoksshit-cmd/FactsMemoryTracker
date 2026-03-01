@@ -1059,141 +1059,137 @@
     const s = getSettings();
     currentSortMode = s.sortMode || 'date';
 
+    const secState = (() => {
+      try { return JSON.parse(localStorage.getItem('fmt_sec_state') || '{}'); } catch { return {}; }
+    })();
+    const saveSec = () => { try { localStorage.setItem('fmt_sec_state', JSON.stringify(secState)); } catch {} };
+
+    // Helper: collapsible section
+    const sec = (id, icon, title, content, defaultOpen = false) => {
+      const open = secState[id] !== undefined ? secState[id] : defaultOpen;
+      return `
+        <div class="fmt-sec" id="fmt_sec_${id}">
+          <div class="fmt-sec-hdr" data-sec="${id}">
+            <span class="fmt-sec-chev">${open ? '▾' : '▸'}</span>
+            <span>${icon} ${title}</span>
+          </div>
+          <div class="fmt-sec-body"${open ? '' : ' style="display:none"'}>${content}</div>
+        </div>`;
+    };
+
+    const secBasic = `
+      <div class="fmt-2col">
+        <label class="fmt-ck"><input type="checkbox" id="fmt_enabled" ${s.enabled?'checked':''}><span>Инъекция в промпт</span></label>
+        <label class="fmt-ck"><input type="checkbox" id="fmt_show_widget" ${s.showWidget?'checked':''}><span>Виджет 🧠</span></label>
+      </div>
+      <div class="fmt-srow fmt-slider-row">
+        <label>Размер виджета:</label>
+        <input type="range" id="fmt_fab_scale" min="0.4" max="1.4" step="0.1" value="${s.fabScale??0.8}">
+        <span id="fmt_fab_scale_val">${Math.round((s.fabScale??0.8)*100)}%</span>
+      </div>
+      <div class="fmt-compact-btns">
+        <button class="menu_button" id="fmt_open_drawer_btn">📂 Открыть трекер</button>
+        <button class="menu_button" id="fmt_scan_settings_btn">🔍 Сканировать</button>
+        <button class="menu_button" id="fmt_reset_pos_btn">↺ Позиция</button>
+      </div>`;
+
+    const secScan = `
+      <div class="fmt-2col">
+        <label class="fmt-ck"><input type="checkbox" id="fmt_auto_scan" ${s.autoScan?'checked':''}><span>Авто-скан</span></label>
+        <label class="fmt-ck"><input type="checkbox" id="fmt_auto_marker" ${s.autoMarker?'checked':''}><span>Авто-маркер [FACT:]</span></label>
+      </div>
+      <div class="fmt-srow fmt-slider-row">
+        <label>Каждые:</label>
+        <input type="range" id="fmt_auto_every" min="5" max="100" step="5" value="${s.autoScanEvery}">
+        <span id="fmt_auto_every_val">${s.autoScanEvery}</span><span style="opacity:.5;font-size:10px">сообщ.</span>
+      </div>
+      <div class="fmt-srow fmt-slider-row">
+        <label>Глубина:</label>
+        <input type="range" id="fmt_scan_depth" min="10" max="200" step="10" value="${s.scanDepth}">
+        <span id="fmt_scan_depth_val">${s.scanDepth}</span><span style="opacity:.5;font-size:10px">сообщ.</span>
+      </div>`;
+
+    const secInject = `
+      <div class="fmt-srow">
+        <label style="white-space:nowrap;font-size:12px">Важность ≥</label>
+        <select id="fmt_inject_imp" style="flex:1">
+          <option value="low" ${s.injectImportance==='low'?'selected':''}>⚪ Все</option>
+          <option value="medium" ${s.injectImportance==='medium'?'selected':''}>🟡 Medium+</option>
+          <option value="high" ${s.injectImportance==='high'?'selected':''}>🔴 High only</option>
+        </select>
+      </div>
+      <div class="fmt-srow fmt-slider-row">
+        <label>Макс. фактов:</label>
+        <input type="range" id="fmt_max_facts" min="5" max="100" step="5" value="${s.maxInjectFacts||30}">
+        <span id="fmt_max_facts_val">${s.maxInjectFacts||30}</span>
+      </div>
+      <div style="margin-top:6px">
+        <div style="font-size:10px;color:rgba(180,200,240,.5);margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Шаблон промпта <code style="background:rgba(100,160,255,.1);padding:1px 4px;border-radius:3px">{{facts}}</code></div>
+        <textarea id="fmt_prompt_tpl" rows="3">${escHtml(s.promptTemplate||DEFAULT_PROMPT_TEMPLATE)}</textarea>
+        <button class="menu_button" id="fmt_reset_tpl_btn" style="margin-top:3px;padding:3px 8px;font-size:10px">↩ Сброс</button>
+      </div>`;
+
+    const flashCats = s.flashCats || ['flashbacks','secrets','characters'];
+    const secFlash = `
+      <div class="fmt-2col">
+        <label class="fmt-ck"><input type="checkbox" id="fmt_flash_enabled" ${s.flashEnabled!==false?'checked':''}><span>Включён</span></label>
+      </div>
+      <div class="fmt-srow fmt-slider-row">
+        <label>Авто-шанс:</label>
+        <input type="range" id="fmt_flash_chance" min="0" max="30" step="1" value="${s.flashChance||0}">
+        <span id="fmt_flash_chance_val">${s.flashChance||0}%</span>
+      </div>
+      <div style="font-size:11px;color:rgba(180,200,240,.6);margin:4px 0 3px">Категории для флешбека:</div>
+      <div class="fmt-2col">
+        ${Object.entries(CATEGORIES).map(([k,v])=>`
+          <label class="fmt-ck"><input type="checkbox" class="fmt-flash-cat-cb" value="${k}" ${flashCats.includes(k)?'checked':''}><span>${v.icon} ${v.label}</span></label>`).join('')}
+      </div>
+      <div style="font-size:10px;color:rgba(180,200,240,.4);margin-top:4px;line-height:1.5">
+        Кнопка ⚡ в трекере — ручной запуск. Авто-шанс срабатывает на каждое сообщение юзера.
+      </div>`;
+
+    const secApi = `
+      <div style="font-size:10px;color:rgba(180,200,240,.45);margin-bottom:6px">Оставь пустым — ST generateRaw. Иначе укажи свой прокси.</div>
+      <input type="text" id="fmt_api_endpoint" class="fmt-api-field" placeholder="https://api.openai.com/v1" value="${escHtml(s.apiEndpoint||'')}">
+      <div class="fmt-srow" style="gap:5px;margin-top:4px">
+        <input type="password" id="fmt_api_key" class="fmt-api-field" placeholder="API Key (sk-...)" value="${s.apiKey||''}" style="margin-bottom:0;flex:1">
+        <button type="button" id="fmt_api_key_toggle" class="menu_button" style="padding:4px 8px;flex-shrink:0">👁</button>
+      </div>
+      <div class="fmt-srow" style="gap:5px;margin-top:4px">
+        <select id="fmt_api_model" class="fmt-api-select" style="flex:1">
+          ${s.apiModel?`<option value="${escHtml(s.apiModel)}" selected>${escHtml(s.apiModel)}</option>`:'<option value="">-- нажми 🔄 --</option>'}
+        </select>
+        <button type="button" id="fmt_refresh_models" class="menu_button" style="padding:4px 8px;flex-shrink:0" title="Загрузить модели">🔄</button>
+      </div>`;
+
     $(target).append(`
       <div class="fmt-settings-block" id="fmt_settings_block">
         <div class="fmt-settings-title">
-          <span>🧠 Трекер памяти фактов</span>
-          <button type="button" id="fmt_collapse_btn">${s.collapsed ? '▸' : '▾'}</button>
+          <span>🧠 Память фактов</span>
+          <button type="button" id="fmt_collapse_btn">${s.collapsed?'▸':'▾'}</button>
         </div>
-        <div class="fmt-settings-body"${s.collapsed ? ' style="display:none"' : ''}>
-
-          <div class="fmt-srow">
-            <label class="checkbox_label">
-              <input type="checkbox" id="fmt_enabled" ${s.enabled ? 'checked' : ''}>
-              <span>Инжектировать факты в промпт</span>
-            </label>
-          </div>
-          <div class="fmt-srow">
-            <label class="checkbox_label">
-              <input type="checkbox" id="fmt_show_widget" ${s.showWidget ? 'checked' : ''}>
-              <span>Показывать виджет 🧠</span>
-            </label>
-          </div>
-          <div class="fmt-srow fmt-slider-row">
-            <label>Размер виджета:</label>
-            <input type="range" id="fmt_fab_scale" min="0.4" max="1.4" step="0.1" value="${s.fabScale ?? 0.8}">
-            <span id="fmt_fab_scale_val">${Math.round((s.fabScale ?? 0.8) * 100)}%</span>
-          </div>
-          <div class="fmt-srow">
-            <label class="checkbox_label">
-              <input type="checkbox" id="fmt_auto_scan" ${s.autoScan ? 'checked' : ''}>
-              <span>Авто-сканирование каждые N сообщений</span>
-            </label>
-          </div>
-          <div class="fmt-srow">
-            <label class="checkbox_label">
-              <input type="checkbox" id="fmt_auto_marker" ${s.autoMarker ? 'checked' : ''}>
-              <span>Авто-маркер <code>[FACT: текст | категория]</code></span>
-            </label>
-          </div>
-          <div class="fmt-srow fmt-slider-row">
-            <label>Авто-скан каждые:</label>
-            <input type="range" id="fmt_auto_every" min="5" max="100" step="5" value="${s.autoScanEvery}">
-            <span id="fmt_auto_every_val">${s.autoScanEvery}</span> сообщ.
-          </div>
-          <div class="fmt-srow fmt-slider-row">
-            <label>Глубина скана:</label>
-            <input type="range" id="fmt_scan_depth" min="10" max="200" step="10" value="${s.scanDepth}">
-            <span id="fmt_scan_depth_val">${s.scanDepth}</span> сообщ.
-          </div>
-          <div class="fmt-srow">
-            <label>Инжектировать ≥</label>
-            <select id="fmt_inject_imp">
-              <option value="low"    ${s.injectImportance==='low'    ?'selected':''}>⚪ Все</option>
-              <option value="medium" ${s.injectImportance==='medium' ?'selected':''}>🟡 Medium+</option>
-              <option value="high"   ${s.injectImportance==='high'   ?'selected':''}>🔴 Только High</option>
-            </select>
-          </div>
-          <div class="fmt-srow fmt-slider-row">
-            <label>Макс. фактов в инъекции:</label>
-            <input type="range" id="fmt_max_facts" min="5" max="100" step="5" value="${s.maxInjectFacts || 30}">
-            <span id="fmt_max_facts_val">${s.maxInjectFacts || 30}</span>
-          </div>
-
-          <div class="fmt-api-section">
-            <div class="fmt-api-title">⚡ Флешбек-триггер</div>
-            <div class="fmt-api-hint">Заставляет {{char}} вспомнить случайный факт в следующем ответе. Нажми кнопку в трекере или включи авто-шанс.</div>
-            <div class="fmt-srow">
-              <label class="checkbox_label">
-                <input type="checkbox" id="fmt_flash_enabled" ${(s.flashEnabled !== false) ? 'checked' : ''}>
-                <span>Включить флешбек-триггер</span>
-              </label>
-            </div>
-            <div class="fmt-srow fmt-slider-row">
-              <label>Авто-шанс на сообщение:</label>
-              <input type="range" id="fmt_flash_chance" min="0" max="30" step="1" value="${s.flashChance || 0}">
-              <span id="fmt_flash_chance_val">${s.flashChance || 0}%</span>
-            </div>
-            <div class="fmt-srow" style="flex-direction:column;align-items:flex-start;gap:4px">
-              <label style="margin-bottom:2px">Категории для флешбека:</label>
-              <div style="display:flex;gap:8px;flex-wrap:wrap">
-                ${Object.entries(CATEGORIES).map(([k,v]) => `
-                  <label class="checkbox_label" style="font-size:12px">
-                    <input type="checkbox" class="fmt-flash-cat-cb" value="${k}" ${(s.flashCats||['flashbacks','secrets','characters']).includes(k) ? 'checked' : ''}>
-                    <span>${v.icon} ${v.label}</span>
-                  </label>`).join('')}
-              </div>
-            </div>
-          </div>
-
-          <div class="fmt-api-section">
-            <div class="fmt-api-title">📝 Шаблон промпта</div>
-            <div class="fmt-api-hint">Используй <code>{{facts}}</code> как плейсхолдер для строк фактов.</div>
-            <textarea id="fmt_prompt_tpl" rows="4">${escHtml(s.promptTemplate || DEFAULT_PROMPT_TEMPLATE)}</textarea>
-            <button class="menu_button" id="fmt_reset_tpl_btn" style="margin-top:4px;padding:4px 10px;font-size:11px">↩ Сбросить</button>
-          </div>
-
-          <div class="fmt-api-section">
-            <div class="fmt-api-title">⚙️ API для сканирования</div>
-            <div class="fmt-api-hint">Оставь пустым — используется встроенный ST generateRaw.</div>
-            <label class="fmt-api-label">Endpoint</label>
-            <div class="fmt-srow">
-              <input type="text" id="fmt_api_endpoint" class="fmt-api-field" placeholder="https://api.openai.com/v1" value="${escHtml(s.apiEndpoint || '')}">
-            </div>
-            <label class="fmt-api-label">API Key</label>
-            <div class="fmt-srow" style="gap:6px">
-              <input type="password" id="fmt_api_key" class="fmt-api-field" placeholder="sk-..." value="${s.apiKey || ''}">
-              <button type="button" id="fmt_api_key_toggle" class="menu_button" style="padding:5px 10px">👁</button>
-            </div>
-            <label class="fmt-api-label">Модель</label>
-            <div class="fmt-srow" style="gap:6px">
-              <select id="fmt_api_model" class="fmt-api-select" style="flex:1">
-                ${s.apiModel ? `<option value="${escHtml(s.apiModel)}" selected>${escHtml(s.apiModel)}</option>` : '<option value="">-- нажми 🔄 --</option>'}
-              </select>
-              <button type="button" id="fmt_refresh_models" class="menu_button" style="padding:5px 10px" title="Загрузить модели">🔄</button>
-            </div>
-          </div>
-
-          <div class="fmt-srow fmt-btn-row">
-            <button class="menu_button" id="fmt_open_drawer_btn">Открыть трекер</button>
-            <button class="menu_button" id="fmt_scan_settings_btn">🔍 Сканировать</button>
-            <button class="menu_button" id="fmt_reset_pos_btn">Сбросить позицию</button>
-          </div>
-
-          <div class="fmt-hint">
-            <b>Как работает:</b><br>
-            🔍 <b>Сканировать</b> — AI анализирует историю, извлекает факты без дублей.<br>
-            ⚡ <b>Авто-скан</b> — каждые N сообщений автоматически.<br>
-            🏷️ <b>[FACT: текст | категория]</b> — маркер в ответе модели = мгновенное добавление.<br>
-            ✏️ <b>Редактирование</b> — кликни на текст факта в трекере.<br>
-            ⏸ <b>Отключить</b> — факт хранится, но не инжектируется.<br>
-            💾 <b>Инъекция</b> — только нужные факты, экономия токенов.
-          </div>
+        <div class="fmt-settings-body"${s.collapsed?' style="display:none"':''}>
+          ${sec('basic',  '⚙️', 'Основное',    secBasic,  true)}
+          ${sec('scan',   '🔍', 'Сканирование', secScan,   false)}
+          ${sec('inject', '💉', 'Инъекция',     secInject, false)}
+          ${sec('flash',  '⚡', 'Флешбек',      secFlash,  false)}
+          ${sec('api',    '🔌', 'API',          secApi,    false)}
         </div>
       </div>
     `);
 
-    // Collapse
+    // Accordion sections toggle
+    $(document).off('click.fmt_sec').on('click.fmt_sec', '.fmt-sec-hdr', function () {
+      const id   = this.getAttribute('data-sec');
+      const body = $(this).next('.fmt-sec-body');
+      const open = body.is(':visible');
+      body.toggle(!open);
+      $(this).find('.fmt-sec-chev').text(open ? '▸' : '▾');
+      secState[id] = !open;
+      saveSec();
+    });
+
+    // Collapse entire block
     $('#fmt_collapse_btn').on('click', () => {
       s.collapsed = !s.collapsed;
       $('#fmt_settings_block .fmt-settings-body').toggle(!s.collapsed);
