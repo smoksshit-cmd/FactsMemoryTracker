@@ -65,6 +65,7 @@
     fabScale:         0.8,
     autoMarker:       true,
     sortMode:         'date',
+    fallbackEnabled:  true,   // откат на ST generateRaw если кастовый API не ответил
     // Флешбек-триггер
     flashEnabled:     true,
     flashChance:      0,          // 0 = только вручную, 1–30 = % шанс на каждое сообщение
@@ -184,42 +185,197 @@
 
   function getBaseUrl() {
     return (getSettings().apiEndpoint || '').trim()
-      .replace(/\/+$/, '').replace(/\/chat\/completions$/, '').replace(/\/v1$/, '');
+      .replace(/\/+$/, '')
+      .replace(/\/(chat\/completions|completions)$/, '')
+      .replace(/\/v1$/, '');
   }
 
+  // Пробуем разные эндпоинты для получения списка моделей
   async function fetchModels() {
     const base   = getBaseUrl();
     const apiKey = (getSettings().apiKey || '').trim();
-    if (!base || !apiKey) throw new Error('Укажи Endpoint и API Key');
-    const resp = await fetch(`${base}/v1/models`, { headers: { Authorization: `Bearer ${apiKey}` } });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    return (data.data || data.models || []).map(m => typeof m === 'string' ? m : m.id).filter(Boolean).sort();
+    if (!base) throw new Error('Укажи Endpoint');
+
+    const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+
+    // Некоторые прокси не поддерживают /v1/models — пробуем несколько путей
+    const candidates = [
+      `${base}/v1/models`,
+      `${base}/models`,
+      `${base}/api/models`,
+    ];
+
+    for (const url of candidates) {
+      try {
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) continue;
+        const data = await resp.json();
+        // Разные форматы ответа
+        const list = data.data || data.models || data.model_ids || data.available_models || [];
+        const ids  = list.map(m => {
+          if (typeof m === 'string') return m;
+          return m.id || m.name || m.model_id || null;
+        }).filter(Boolean).sort();
+        if (ids.length) return ids;
+      } catch {}
+    }
+
+    throw new Error('Список моделей недоступен. Введи модель вручную.');
   }
+
+  // Тест соединения — короткий запрос чтобы проверить работоспособность
+  async function testApiConnection() {
+    const s    = getSettings();
+    const base = getBaseUrl();
+    if (!base) throw new Error('Endpoint не задан');
+
+    const apiKey = (s.apiKey || '').trim();
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    };
+
+    // Минимальный запрос — разные форматы для совместимости
+    const bodies = [
+      // OpenAI-совместимый с system
+      { model: s.apiModel || 'gpt-4o-mini', max_tokens: 5, temperature: 0,
+        messages: [{ role: 'system', content: 'test' }, { role: 'user', content: 'hi' }] },
+      // Без system (некоторые прокси не поддерживают)
+      { model: s.apiModel || 'gpt-4o-mini', max_tokens: 5, temperature: 0,
+        messages: [{ role: 'user', content: 'hi' }] },
+    ];
+
+    const endpoints = [
+      `${base}/v1/chat/completions`,
+      `${base}/chat/completions`,
+      `${base}/v1/completions`,
+    ];
+
+    for (const url of endpoints) {
+      for (const body of bodies) {
+        try {
+          const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+          if (resp.ok) {
+            const data = await resp.json();
+            const text = data.choices?.[0]?.message?.content
+              ?? data.choices?.[0]?.text
+              ?? data.response
+              ?? data.content;
+            if (text !== undefined) return { url, body };
+          }
+        } catch {}
+      }
+    }
+    throw new Error('Ни один из эндпоинтов не ответил корректно');
+  }
+
+  // Сохраняем рабочий формат чтобы не перебирать каждый раз
+  let _workingApiConfig = null;
 
   async function aiGenerate(userPrompt, systemPrompt) {
     const s    = getSettings();
     const base = getBaseUrl();
-    if (base && s.apiKey) {
-      const resp = await fetch(`${base}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.apiKey}` },
-        body: JSON.stringify({
-          model: s.apiModel || 'gpt-4o-mini', max_tokens: 1024, temperature: 0.1,
-          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-        }),
-      });
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => resp.statusText);
-        throw new Error(`API ${resp.status}: ${err.slice(0, 200)}`);
+    const apiKey = (s.apiKey || '').trim();
+
+    // Если кастомный API настроен — пробуем его
+    if (base) {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      };
+
+      // Если уже знаем рабочий формат — используем сразу
+      if (_workingApiConfig?.base === base) {
+        try {
+          const result = await callApiWithConfig(_workingApiConfig, userPrompt, systemPrompt, headers);
+          if (result !== null) return result;
+        } catch {}
+        // Рабочий конфиг перестал работать — сбрасываем
+        _workingApiConfig = null;
       }
-      const data = await resp.json();
-      return data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
+
+      // Перебираем варианты эндпоинт × формат
+      const endpoints = [
+        `${base}/v1/chat/completions`,
+        `${base}/chat/completions`,
+        `${base}/v1/completions`,
+        `${base}/completions`,
+      ];
+
+      // Форматы тела запроса — от самого совместимого к специфичным
+      const bodyBuilders = [
+        // Стандарт OpenAI с system
+        (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
+          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] }),
+        // Без system — system объединяем с user
+        (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n---\n\n${userPrompt}` }] }),
+        // Некоторые прокси используют 'prompt' вместо messages
+        (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
+          prompt: `${systemPrompt}\n\n${userPrompt}` }),
+      ];
+
+      const model = s.apiModel || 'gpt-4o-mini';
+
+      for (const url of endpoints) {
+        for (const builder of bodyBuilders) {
+          try {
+            const resp = await fetch(url, {
+              method: 'POST', headers, body: JSON.stringify(builder(model)),
+            });
+            if (!resp.ok) continue;
+            const data = await resp.json();
+            const text = extractTextFromResponse(data);
+            if (text !== null) {
+              // Запоминаем рабочий формат
+              _workingApiConfig = { base, url, builder };
+              return text;
+            }
+          } catch {}
+        }
+      }
+
+      // Кастомный API не сработал — логируем и падаем на fallback
+      console.warn('[FMT] Кастомный API не ответил — откат на ST generateRaw');
+      if (s.fallbackEnabled !== false) {
+        toastr.warning('[FMT] Кастовый API не отвечает — используется встроенный ST', '', { timeOut: 4000 });
+      } else {
+        throw new Error('Кастовый API не ответил. Проверь настройки или включи fallback на ST.');
+      }
     }
+
+    // Fallback: встроенный ST generateRaw
     const c = ctx();
     if (typeof c.generateRaw === 'function')
       return await c.generateRaw(userPrompt, null, false, false, systemPrompt, true);
-    throw new Error('Не задан API и нет generateRaw в SillyTavern');
+
+    throw new Error('Нет доступного API для генерации. Настрой кастовый API или используй ST с подключённой моделью.');
+  }
+
+  async function callApiWithConfig(cfg, userPrompt, systemPrompt, headers) {
+    const s = getSettings();
+    const resp = await fetch(cfg.url, {
+      method: 'POST', headers,
+      body: JSON.stringify(cfg.builder(s.apiModel || 'gpt-4o-mini')),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return extractTextFromResponse(data);
+  }
+
+  function extractTextFromResponse(data) {
+    // OpenAI chat completions
+    if (data.choices?.[0]?.message?.content !== undefined)
+      return data.choices[0].message.content;
+    // OpenAI completions (legacy)
+    if (data.choices?.[0]?.text !== undefined)
+      return data.choices[0].text;
+    // Некоторые кастомные прокси
+    if (typeof data.response === 'string') return data.response;
+    if (typeof data.content  === 'string') return data.content;
+    if (typeof data.text     === 'string') return data.text;
+    if (data.message?.content !== undefined) return data.message.content;
+    return null;
   }
 
   // ─── Extraction ───────────────────────────────────────────────────────────────
@@ -1148,18 +1304,53 @@
         Кнопка ⚡ в трекере — ручной запуск. Авто-шанс срабатывает на каждое сообщение юзера.
       </div>`;
 
+    const hasCustomApi = !!(s.apiEndpoint || '').trim();
     const secApi = `
-      <div style="font-size:10px;color:rgba(180,200,240,.45);margin-bottom:6px">Оставь пустым — ST generateRaw. Иначе укажи свой прокси.</div>
-      <input type="text" id="fmt_api_endpoint" class="fmt-api-field" placeholder="https://api.openai.com/v1" value="${escHtml(s.apiEndpoint||'')}">
-      <div class="fmt-srow" style="gap:5px;margin-top:4px">
-        <input type="password" id="fmt_api_key" class="fmt-api-field" placeholder="API Key (sk-...)" value="${s.apiKey||''}" style="margin-bottom:0;flex:1">
-        <button type="button" id="fmt_api_key_toggle" class="menu_button" style="padding:4px 8px;flex-shrink:0">👁</button>
+      <div class="fmt-api-mode-bar">
+        <div class="fmt-api-mode-label">Источник генерации:</div>
+        <div class="fmt-api-mode-btns">
+          <button class="fmt-api-mode-btn ${!hasCustomApi?'active':''}" data-mode="st" title="Использовать модель которая уже подключена в ST">
+            🟢 ST (текущий)
+          </button>
+          <button class="fmt-api-mode-btn ${hasCustomApi?'active':''}" data-mode="custom" title="Указать отдельный API / прокси для сканирования">
+            🔌 Кастомный API
+          </button>
+        </div>
       </div>
-      <div class="fmt-srow" style="gap:5px;margin-top:4px">
-        <select id="fmt_api_model" class="fmt-api-select" style="flex:1">
-          ${s.apiModel?`<option value="${escHtml(s.apiModel)}" selected>${escHtml(s.apiModel)}</option>`:'<option value="">-- нажми 🔄 --</option>'}
-        </select>
-        <button type="button" id="fmt_refresh_models" class="menu_button" style="padding:4px 8px;flex-shrink:0" title="Загрузить модели">🔄</button>
+
+      <div id="fmt_mode_st" ${hasCustomApi?'style="display:none"':''}>
+        <div class="fmt-api-st-info">
+          ✅ FMT использует модель которая сейчас подключена в SillyTavern.<br>
+          Никаких дополнительных настроек не нужно — всё работает из коробки.
+        </div>
+      </div>
+
+      <div id="fmt_mode_custom" ${!hasCustomApi?'style="display:none"':''}>
+        <div style="font-size:10px;color:rgba(100,220,160,.6);margin-bottom:7px;line-height:1.5">
+          Отдельный API для сканирования — например более умная модель.<br>
+          Авто-перебор эндпоинтов и форматов. API Key необязателен для локальных прокси.
+        </div>
+        <div class="fmt-2col" style="margin-bottom:6px">
+          <label class="fmt-ck"><input type="checkbox" id="fmt_fallback_enabled" ${s.fallbackEnabled!==false?'checked':''}><span>Fallback на ST если недоступен</span></label>
+        </div>
+        <input type="text" id="fmt_api_endpoint" class="fmt-api-field" placeholder="http://localhost:1234/v1 или https://api.openai.com" value="${escHtml(s.apiEndpoint||'')}">
+        <div class="fmt-srow" style="gap:5px;margin-top:4px">
+          <input type="password" id="fmt_api_key" class="fmt-api-field" placeholder="API Key (необязателен)" value="${s.apiKey||''}" style="margin-bottom:0;flex:1">
+          <button type="button" id="fmt_api_key_toggle" class="menu_button" style="padding:4px 8px;flex-shrink:0">👁</button>
+        </div>
+        <div class="fmt-srow" style="gap:5px;margin-top:4px">
+          <select id="fmt_api_model" class="fmt-api-select" style="flex:1">
+            ${s.apiModel?`<option value="${escHtml(s.apiModel)}" selected>${escHtml(s.apiModel)}</option>`:'<option value="">-- введи или загрузи 🔄 --</option>'}
+          </select>
+          <button type="button" id="fmt_refresh_models" class="menu_button" style="padding:4px 8px;flex-shrink:0" title="Загрузить список моделей">🔄</button>
+        </div>
+        <div class="fmt-srow" style="gap:5px;margin-top:4px">
+          <input type="text" id="fmt_api_model_manual" class="fmt-api-field" placeholder="Или введи модель вручную (gpt-4o-mini, llama3 и т.д.)" value="${s.apiModel||''}" style="margin-bottom:0;flex:1">
+        </div>
+        <div class="fmt-srow" style="gap:5px;margin-top:6px">
+          <button type="button" id="fmt_test_api" class="menu_button" style="flex:1;padding:5px 8px;font-size:11px">🔌 Тест соединения</button>
+        </div>
+        <div id="fmt_api_status" style="margin-top:5px;font-size:10px;min-height:14px"></div>
       </div>`;
 
     $(target).append(`
@@ -1246,14 +1437,74 @@
       toastr.success('Шаблон сброшен');
     });
 
-    // API
-    $('#fmt_api_endpoint').on('input', () => { s.apiEndpoint = $('#fmt_api_endpoint').val().trim(); ctx().saveSettingsDebounced(); });
-    $('#fmt_api_key').on('input',      () => { s.apiKey      = $('#fmt_api_key').val().trim();      ctx().saveSettingsDebounced(); });
+    // API mode switcher (ST vs Custom)
+    $(document).off('click.fmt_apimode').on('click.fmt_apimode', '.fmt-api-mode-btn', function () {
+      const mode = this.getAttribute('data-mode');
+      document.querySelectorAll('.fmt-api-mode-btn').forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      if (mode === 'st') {
+        $('#fmt_mode_st').show(); $('#fmt_mode_custom').hide();
+        // Сбрасываем кастовый API
+        s.apiEndpoint = ''; s.apiKey = '';
+        _workingApiConfig = null;
+        ctx().saveSettingsDebounced();
+        toastr.info('[FMT] Используется ST (текущая подключённая модель)', '', { timeOut: 2500 });
+      } else {
+        $('#fmt_mode_st').hide(); $('#fmt_mode_custom').show();
+      }
+    });
+
+    // API fields
+    $('#fmt_api_endpoint').on('input', () => {
+      s.apiEndpoint = $('#fmt_api_endpoint').val().trim();
+      _workingApiConfig = null;
+      ctx().saveSettingsDebounced();
+    });
+    $('#fmt_api_key').on('input', () => {
+      s.apiKey = $('#fmt_api_key').val().trim();
+      _workingApiConfig = null;
+      ctx().saveSettingsDebounced();
+    });
     $('#fmt_api_key_toggle').on('click', () => {
       const inp = document.getElementById('fmt_api_key');
       inp.type = inp.type === 'password' ? 'text' : 'password';
     });
-    $('#fmt_api_model').on('change', () => { s.apiModel = $('#fmt_api_model').val(); ctx().saveSettingsDebounced(); });
+    $('#fmt_api_model').on('change', () => {
+      s.apiModel = $('#fmt_api_model').val();
+      $('#fmt_api_model_manual').val(s.apiModel);
+      _workingApiConfig = null;
+      ctx().saveSettingsDebounced();
+    });
+    $('#fmt_api_model_manual').on('input', () => {
+      const v = $('#fmt_api_model_manual').val().trim();
+      s.apiModel = v;
+      _workingApiConfig = null;
+      ctx().saveSettingsDebounced();
+    });
+    $('#fmt_fallback_enabled').on('input', ev => {
+      s.fallbackEnabled = $(ev.currentTarget).prop('checked');
+      ctx().saveSettingsDebounced();
+    });
+
+    // Тест соединения
+    $('#fmt_test_api').on('click', async () => {
+      const $btn    = $('#fmt_test_api');
+      const $status = $('#fmt_api_status');
+      $btn.prop('disabled', true).text('⏳ Проверка…');
+      $status.css('color', 'rgba(180,200,240,.5)').text('Перебираю эндпоинты…');
+      try {
+        const cfg = await testApiConnection();
+        _workingApiConfig = { base: getBaseUrl(), ...cfg };
+        $status.css('color', '#70e8c0').text(`✅ Работает: ${cfg.url.replace(getBaseUrl(), '')}`);
+        toastr.success('[FMT] API отвечает корректно');
+      } catch (e) {
+        $status.css('color', '#ff7070').text(`❌ ${e.message}`);
+        toastr.error('[FMT] ' + e.message);
+      } finally {
+        $btn.prop('disabled', false).text('🔌 Тест соединения');
+      }
+    });
+
     $('#fmt_refresh_models').on('click', async () => {
       const $btn = $('#fmt_refresh_models');
       $btn.prop('disabled', true).text('⏳');
@@ -1264,8 +1515,11 @@
         $sel.html('<option value="">-- выбери модель --</option>');
         models.forEach(id => $sel.append(new Option(id, id, id === current, id === current)));
         toastr.success(`Загружено: ${models.length} моделей`);
-      } catch (e) { toastr.error(`[FMT] ${e.message}`); }
-      finally { $btn.prop('disabled', false).text('🔄'); }
+      } catch (e) {
+        toastr.warning(`[FMT] ${e.message} — введи модель вручную`);
+      } finally {
+        $btn.prop('disabled', false).text('🔄');
+      }
     });
 
     $(document)
