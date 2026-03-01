@@ -511,6 +511,7 @@ ${lines.join('\n')}
   }
 
 
+  function ensureFab() {
     if ($('#fmt_fab').length) return;
     $('body').append(`
       <div id="fmt_fab">
@@ -866,6 +867,7 @@ ${lines.join('\n')}
   }
 
 
+  async function clearAllFacts() {
     const { Popup } = ctx();
     const ok = await Popup.show.confirm('Очистить все факты?', 'Это действие нельзя отменить.');
     if (!ok) return;
@@ -1112,4 +1114,5 @@ ${lines.join('\n')}
       console.error('[FMT] init failed', e);
     }
   });
-})
+
+})();
