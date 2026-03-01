@@ -1,0 +1,12 @@
+{
+    "display_name": "Memory Extractor",
+    "version": "1.0.0",
+    "author": "custom",
+    "description": "Extracts structured facts from roleplay chat (characters, events, secrets) and injects them into context without wasting tokens.",
+    "js": "index.js",
+    "css": "style.css",
+    "homepage": "",
+    "tags": ["memory", "context", "roleplay", "facts"],
+    "requires": [],
+    "optional": []
+}
