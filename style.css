@@ -1,0 +1,364 @@
+/* ============================================================
+   Memory Extractor — SillyTavern Extension Styles
+   ============================================================ */
+
+/* ─── Panel ─────────────────────────────────────────────────── */
+.mem-panel {
+    background    : #1a1a2e;
+    border        : 1px solid #2e2e4e;
+    border-radius : 10px;
+    margin-bottom : 12px;
+    overflow      : hidden;
+    font-family   : inherit;
+}
+
+.mem-header {
+    display         : flex;
+    justify-content : space-between;
+    align-items     : center;
+    padding         : 10px 14px;
+    background      : #16213e;
+    cursor          : pointer;
+    user-select     : none;
+    font-weight     : 600;
+    font-size       : 14px;
+    color           : #c9d1e0;
+    border-bottom   : 1px solid #2e2e4e;
+    transition      : background 0.2s;
+}
+.mem-header:hover { background: #1d2b4e; }
+
+.mem-header-right {
+    display     : flex;
+    align-items : center;
+    gap         : 10px;
+}
+
+.mem-chevron {
+    color      : #7eb8f7;
+    font-size  : 16px;
+    transition : transform 0.25s;
+}
+.mem-chevron.open { transform: rotate(180deg); }
+
+/* ─── Toggle Switch ─────────────────────────────────────────── */
+.mem-toggle-wrap {
+    position : relative;
+    display  : inline-block;
+    width    : 36px;
+    height   : 20px;
+    cursor   : pointer;
+}
+.mem-toggle-wrap input { opacity: 0; width: 0; height: 0; }
+
+.mem-toggle {
+    position         : absolute;
+    inset            : 0;
+    background       : #3a3a5c;
+    border-radius    : 20px;
+    transition       : background 0.25s;
+}
+.mem-toggle::before {
+    content          : '';
+    position         : absolute;
+    width            : 14px;
+    height           : 14px;
+    left             : 3px;
+    top              : 3px;
+    background       : #fff;
+    border-radius    : 50%;
+    transition       : transform 0.25s;
+}
+.mem-toggle-wrap input:checked + .mem-toggle             { background: #5a7ef7; }
+.mem-toggle-wrap input:checked + .mem-toggle::before     { transform: translateX(16px); }
+
+/* ─── Body / Sections ───────────────────────────────────────── */
+.mem-body    { padding: 12px 14px; display: none; }
+.mem-section {
+    background    : #16213e;
+    border        : 1px solid #2a2a4a;
+    border-radius : 8px;
+    padding       : 10px 12px;
+    margin-bottom : 10px;
+}
+
+.mem-label {
+    font-size     : 11px;
+    font-weight   : 700;
+    color         : #7eb8f7;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-bottom : 8px;
+}
+
+/* ─── Radio / Checkbox ─────────────────────────────────────── */
+.mem-radio-row {
+    display        : flex;
+    gap            : 14px;
+    flex-wrap      : wrap;
+    margin-bottom  : 8px;
+}
+.mem-radio-row label,
+.mem-cat-row {
+    display     : flex;
+    align-items : center;
+    gap         : 6px;
+    font-size   : 13px;
+    color       : #c9d1e0;
+    cursor      : pointer;
+}
+.mem-cat-row { margin-bottom: 5px; }
+
+/* ─── Inputs ─────────────────────────────────────────────────── */
+.mem-input {
+    width         : 100%;
+    background    : #0f0f23;
+    border        : 1px solid #3a3a5c;
+    border-radius : 6px;
+    color         : #c9d1e0;
+    padding       : 6px 9px;
+    font-size     : 13px;
+    margin-top    : 5px;
+    box-sizing    : border-box;
+    transition    : border-color 0.2s;
+}
+.mem-input:focus {
+    outline       : none;
+    border-color  : #5a7ef7;
+}
+.mem-input::placeholder { color: #555570; }
+
+.mem-input-sm {
+    width         : 60px;
+    background    : #0f0f23;
+    border        : 1px solid #3a3a5c;
+    border-radius : 6px;
+    color         : #c9d1e0;
+    padding       : 4px 7px;
+    font-size     : 13px;
+    text-align    : center;
+}
+.mem-input-sm:focus { outline: none; border-color: #5a7ef7; }
+
+.mem-select {
+    background    : #0f0f23;
+    border        : 1px solid #3a3a5c;
+    border-radius : 6px;
+    color         : #c9d1e0;
+    padding       : 4px 8px;
+    font-size     : 13px;
+    flex          : 1;
+}
+.mem-select:focus { outline: none; border-color: #5a7ef7; }
+
+.mem-row {
+    display     : flex;
+    align-items : center;
+    gap         : 8px;
+    font-size   : 13px;
+    color       : #a0a8c0;
+    flex-wrap   : wrap;
+}
+
+/* ─── Custom API Block ──────────────────────────────────────── */
+#mem_custom_block {
+    display     : none;
+    margin-top  : 6px;
+    gap         : 4px;
+    flex-direction: column;
+}
+#mem_custom_block .mem-input { margin-top: 4px; }
+
+/* ─── Buttons ────────────────────────────────────────────────── */
+.mem-btn {
+    background    : #2a2a4a;
+    border        : 1px solid #3a3a5c;
+    border-radius : 6px;
+    color         : #c9d1e0;
+    padding       : 5px 11px;
+    font-size     : 12px;
+    cursor        : pointer;
+    transition    : background 0.2s, border-color 0.2s;
+    white-space   : nowrap;
+}
+.mem-btn:hover          { background: #3a3a6a; border-color: #5a5a8a; }
+.mem-btn:disabled       { opacity: 0.5; cursor: not-allowed; }
+.mem-btn-primary        { background: #2a4a8a; border-color: #4a6ab0; color: #c9d8ff; }
+.mem-btn-primary:hover  { background: #3a5aaa; }
+.mem-btn-danger         { background: #4a1a2a; border-color: #7a3a4a; color: #ffb0b0; }
+.mem-btn-danger:hover   { background: #6a2a3a; }
+
+.mem-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ─── Status ─────────────────────────────────────────────────── */
+.mem-status {
+    font-size   : 12px;
+    margin-top  : 8px;
+    min-height  : 16px;
+    color       : #7eb8f7;
+    transition  : color 0.3s;
+}
+
+/* ─── Modal ──────────────────────────────────────────────────── */
+.mem-modal-overlay {
+    position        : fixed;
+    inset           : 0;
+    background      : rgba(0,0,0,0.75);
+    z-index         : 9999;
+    display         : none;
+    align-items     : center;
+    justify-content : center;
+    backdrop-filter : blur(3px);
+}
+
+.mem-modal {
+    background    : #1a1a2e;
+    border        : 1px solid #3a3a6a;
+    border-radius : 12px;
+    width         : min(720px, 94vw);
+    max-height    : 80vh;
+    display       : flex;
+    flex-direction: column;
+    box-shadow    : 0 20px 60px rgba(0,0,0,0.7);
+    overflow      : hidden;
+}
+
+.mem-modal-head {
+    display         : flex;
+    justify-content : space-between;
+    align-items     : center;
+    padding         : 14px 16px;
+    background      : #16213e;
+    border-bottom   : 1px solid #2e2e4e;
+    font-weight     : 600;
+    color           : #c9d1e0;
+    gap             : 10px;
+    flex-wrap       : wrap;
+}
+
+/* ─── Filter Tabs ────────────────────────────────────────────── */
+.mem-modal-filters {
+    display     : flex;
+    gap         : 6px;
+    padding     : 10px 14px;
+    flex-wrap   : wrap;
+    border-bottom: 1px solid #2a2a4a;
+    background  : #161626;
+}
+
+.mem-ftab {
+    background    : #1e1e36;
+    border        : 1px solid #2e2e5e;
+    border-radius : 20px;
+    color         : #8a8aaa;
+    font-size     : 12px;
+    padding       : 4px 12px;
+    cursor        : pointer;
+    transition    : all 0.2s;
+}
+.mem-ftab:hover  { border-color: #5a5a9a; color: #c9d1e0; }
+.mem-ftab.active {
+    background    : #2a3a6a;
+    border-color  : var(--cat-color, #5a7ef7);
+    color         : var(--cat-color, #a0c0ff);
+    font-weight   : 600;
+}
+
+/* ─── Search ─────────────────────────────────────────────────── */
+.mem-modal-search {
+    padding  : 8px 14px;
+    border-bottom: 1px solid #2a2a4a;
+}
+.mem-modal-search .mem-input { margin-top: 0; }
+
+/* ─── Facts List ─────────────────────────────────────────────── */
+.mem-facts-list {
+    flex        : 1;
+    overflow-y  : auto;
+    padding     : 10px 14px;
+    scrollbar-width: thin;
+    scrollbar-color: #3a3a6a transparent;
+}
+.mem-facts-list::-webkit-scrollbar       { width: 5px; }
+.mem-facts-list::-webkit-scrollbar-thumb { background: #3a3a6a; border-radius: 4px; }
+
+.mem-section-block  { margin-bottom: 14px; }
+
+.mem-cat-header {
+    font-size     : 12px;
+    font-weight   : 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-bottom : 7px;
+    display       : flex;
+    align-items   : center;
+    gap           : 8px;
+}
+
+.mem-count {
+    background    : #2a2a4a;
+    border-radius : 10px;
+    padding       : 1px 7px;
+    font-size     : 11px;
+    color         : #7a8aaa;
+}
+
+.mem-fact-item {
+    display         : flex;
+    justify-content : space-between;
+    align-items     : flex-start;
+    background      : #12122a;
+    border          : 1px solid #2a2a4a;
+    border-radius   : 7px;
+    padding         : 7px 10px;
+    margin-bottom   : 5px;
+    gap             : 8px;
+    transition      : border-color 0.2s;
+}
+.mem-fact-item:hover { border-color: #3a3a6a; }
+
+.mem-fact-text {
+    font-size   : 13px;
+    color       : #c9d1e0;
+    line-height : 1.5;
+    flex        : 1;
+}
+.mem-fact-text b { color: #a0c8ff; }
+
+.mem-fact-del {
+    padding    : 2px 7px;
+    font-size  : 11px;
+    opacity    : 0.4;
+    flex-shrink: 0;
+}
+.mem-fact-del:hover { opacity: 1; }
+
+.mem-tag {
+    background    : #1e2a4a;
+    border-radius : 4px;
+    padding       : 1px 6px;
+    font-size     : 11px;
+    color         : #7a9adf;
+}
+
+.mem-empty {
+    color      : #5a5a7a;
+    font-size  : 13px;
+    text-align : center;
+    padding    : 30px;
+}
+
+/* ─── Footer ─────────────────────────────────────────────────── */
+.mem-modal-footer {
+    padding     : 8px 16px;
+    font-size   : 11px;
+    color       : #4a4a6a;
+    border-top  : 1px solid #2a2a4a;
+    background  : #13132a;
+    text-align  : right;
+}
+
+/* ─── Scrollbar global ───────────────────────────────────────── */
+.mem-panel * {
+    box-sizing: border-box;
+}
