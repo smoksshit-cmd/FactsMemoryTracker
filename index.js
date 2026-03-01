@@ -79,7 +79,13 @@
   const collapsedCats  = {};
   let searchQuery      = '';
   let currentSortMode  = 'date';
-  let flashbackPending = false; // ждём следующего MESSAGE_RECEIVED чтобы очистить тег
+
+  // Flashback queue & history
+  // queue: [{id, factId, factText, factCat, ts}] — pending, fire one per bot response
+  // history: [{id, factText, factCat, ts, fired}] — last 10 that actually fired
+  const flashQueue   = [];
+  const flashHistory = [];
+  const MAX_FLASH_HISTORY = 10;
 
   // ─── ST context ───────────────────────────────────────────────────────────────
 
@@ -782,6 +788,7 @@
         </div>
 
         <div class="content" id="fmt_content"></div>
+        <div id="fmt_flash_panel" style="display:none"></div>
 
         <div class="footer">
           <button type="button" id="fmt_scan_btn">🔍 Сканировать</button>
@@ -882,6 +889,7 @@
       drawer.classList.add('fmt-open');
       drawer.setAttribute('aria-hidden', 'false');
       renderDrawer();
+      renderFlashQueueUI();
     } else {
       drawer.classList.remove('fmt-open');
       drawer.setAttribute('aria-hidden', 'true');
@@ -1534,31 +1542,11 @@
 
   // ─── Flashback trigger ────────────────────────────────────────────────────────
 
-  async function triggerFlashback(factId = null) {
-    const s     = getSettings();
-    const state = await getChatState();
-    const { setExtensionPrompt } = ctx();
+  // ─── Flashback trigger ────────────────────────────────────────────────────────
 
-    // Пул фактов для выборки — активные, из разрешённых категорий
-    const allowed = s.flashCats || ['flashbacks', 'secrets', 'characters'];
-    const pool    = state.facts.filter(f =>
-      !f.disabled && allowed.includes(f.category)
-    );
-
-    if (!pool.length) {
-      toastr.warning('[FMT] Нет подходящих фактов для флешбека. Добавь факты категорий: воспоминания, секреты или персонажи.');
-      return;
-    }
-
-    // Конкретный факт или случайный
-    const fact = factId
-      ? pool.find(f => f.id === factId) ?? pool[Math.floor(Math.random() * pool.length)]
-      : pool[Math.floor(Math.random() * pool.length)];
-
+  function buildFlashBlock(fact) {
     const catMeta = CATEGORIES[fact.category] || CATEGORIES.events;
-
-    // Одноразовый промпт — объясняем модели что делать в ЭТОМ ответе
-    const block = `[ФЛЕШБЕК — ТОЛЬКО ДЛЯ ЭТОГО ОТВЕТА]
+    return `[ФЛЕШБЕК — ТОЛЬКО ДЛЯ ЭТОГО ОТВЕТА]
 В этом ответе {{char}} внезапно — посреди сцены или разговора — переживает краткое непроизвольное воспоминание или внутренний образ, связанный со следующим фактом:
 
 ${catMeta.icon} «${fact.text}»
@@ -1569,32 +1557,149 @@ ${catMeta.icon} «${fact.text}»
 - Флешбек короткий (1–3 предложения), не должен занимать весь ответ
 - После него {{char}} возвращается к текущей сцене
 [/ФЛЕШБЕК]`;
+  }
 
-    setExtensionPrompt(FLASHBACK_TAG, block, EXT_PROMPT_TYPES.IN_PROMPT, 0, true);
-    flashbackPending = true;
+  // Инжектируем первый из очереди
+  function applyFlashQueue() {
+    if (!flashQueue.length) {
+      try { ctx().setExtensionPrompt(FLASHBACK_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true); } catch {}
+      return;
+    }
+    const next  = flashQueue[0];
+    try { ctx().setExtensionPrompt(FLASHBACK_TAG, next.block, EXT_PROMPT_TYPES.IN_PROMPT, 0, true); } catch {}
+  }
 
+  // Добавить в очередь
+  async function triggerFlashback(factId = null) {
+    const s     = getSettings();
+    const state = await getChatState();
+
+    const allowed = s.flashCats || ['flashbacks', 'secrets', 'characters'];
+    const pool    = state.facts.filter(f => !f.disabled && allowed.includes(f.category));
+
+    if (!pool.length) {
+      toastr.warning('[FMT] Нет подходящих фактов для флешбека.');
+      return;
+    }
+
+    const fact = factId
+      ? (pool.find(f => f.id === factId) ?? pool[Math.floor(Math.random() * pool.length)])
+      : pool[Math.floor(Math.random() * pool.length)];
+
+    const entry = {
+      id:       makeId(),
+      factId:   fact.id,
+      factText: fact.text,
+      factCat:  fact.category,
+      block:    buildFlashBlock(fact),
+      ts:       Date.now(),
+    };
+
+    flashQueue.push(entry);
+    applyFlashQueue(); // обновляем промпт (если первый в очереди)
+    renderFlashQueueUI();
+
+    const qLen = flashQueue.length;
     toastr.info(
-      `⚡ Флешбек подготовлен: «${fact.text.slice(0, 60)}${fact.text.length > 60 ? '…' : ''}»`,
-      'FMT Флешбек',
-      { timeOut: 5000 }
+      `⚡ Флешбек добавлен${qLen > 1 ? ` (в очереди: ${qLen})` : ''}: «${fact.text.slice(0, 55)}${fact.text.length > 55 ? '…' : ''}»`,
+      'FMT',
+      { timeOut: 4000 }
     );
 
-    // Подсветить строку факта в дровере если открыт
+    // Подсветить строку факта
     const row = document.querySelector(`.fmt-fact-row[data-id="${fact.id}"]`);
     if (row) {
       row.classList.add('fmt-flash-highlight');
-      setTimeout(() => row.classList.remove('fmt-flash-highlight'), 3000);
+      setTimeout(() => row.classList.remove('fmt-flash-highlight'), 2500);
     }
   }
 
-  function clearFlashbackPrompt() {
-    if (!flashbackPending) return;
-    flashbackPending = false;
-    try {
-      ctx().setExtensionPrompt(FLASHBACK_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true);
-    } catch {}
+  // Срабатывает когда пришёл ответ бота — сдвигаем очередь
+  function consumeFlashQueue() {
+    if (!flashQueue.length) return;
+    const fired = flashQueue.shift();
+    // Добавляем в историю
+    flashHistory.unshift({ ...fired, fired: Date.now() });
+    if (flashHistory.length > MAX_FLASH_HISTORY) flashHistory.length = MAX_FLASH_HISTORY;
+    // Применяем следующий или очищаем
+    applyFlashQueue();
+    renderFlashQueueUI();
   }
 
+  // Удалить конкретный элемент из очереди
+  function removeFromFlashQueue(id) {
+    const idx = flashQueue.findIndex(e => e.id === id);
+    if (idx < 0) return;
+    flashQueue.splice(idx, 1);
+    applyFlashQueue();
+    renderFlashQueueUI();
+    toastr.info('[FMT] Флешбек убран из очереди', '', { timeOut: 2000 });
+  }
+
+  // Очистить всю очередь
+  function clearFlashQueue() {
+    flashQueue.length = 0;
+    try { ctx().setExtensionPrompt(FLASHBACK_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true); } catch {}
+    renderFlashQueueUI();
+    toastr.info('[FMT] Очередь флешбеков очищена', '', { timeOut: 2000 });
+  }
+
+  // Render очереди и истории в дровере
+  function renderFlashQueueUI() {
+    const $panel = $('#fmt_flash_panel');
+    if (!$panel.length) return;
+
+    const hasQueue   = flashQueue.length > 0;
+    const hasHistory = flashHistory.length > 0;
+
+    if (!hasQueue && !hasHistory) {
+      $panel.hide();
+      return;
+    }
+
+    $panel.show();
+    let html = '';
+
+    if (hasQueue) {
+      html += `<div class="fmt-fq-section">
+        <div class="fmt-fq-title">
+          ⏳ Очередь (${flashQueue.length})
+          <button class="fmt-fq-clear-all" title="Очистить всю очередь">✕ всё</button>
+        </div>`;
+      flashQueue.forEach((e, i) => {
+        const cat = CATEGORIES[e.factCat] || CATEGORIES.events;
+        html += `<div class="fmt-fq-row">
+          <span class="fmt-fq-pos">${i + 1}</span>
+          <span class="fmt-fq-cat">${cat.icon}</span>
+          <span class="fmt-fq-text">${escHtml(e.factText.slice(0, 70))}${e.factText.length > 70 ? '…' : ''}</span>
+          <button class="fmt-fq-remove" data-qid="${e.id}" title="Убрать из очереди">✕</button>
+        </div>`;
+      });
+      html += '</div>';
+    }
+
+    if (hasHistory) {
+      html += `<div class="fmt-fq-section fmt-fq-history">
+        <div class="fmt-fq-title">🕓 Сработали (последние ${flashHistory.length})</div>`;
+      flashHistory.forEach(e => {
+        const cat  = CATEGORIES[e.factCat] || CATEGORIES.events;
+        const time = new Date(e.fired).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        html += `<div class="fmt-fq-row fmt-fq-fired">
+          <span class="fmt-fq-cat">${cat.icon}</span>
+          <span class="fmt-fq-text">${escHtml(e.factText.slice(0, 70))}${e.factText.length > 70 ? '…' : ''}</span>
+          <span class="fmt-fq-time">${time}</span>
+        </div>`;
+      });
+      html += '</div>';
+    }
+
+    $panel.html(html);
+
+    $panel.find('.fmt-fq-clear-all').off('click').on('click', clearFlashQueue);
+    $panel.find('.fmt-fq-remove').off('click').on('click', function () {
+      removeFromFlashQueue(this.getAttribute('data-qid'));
+    });
+  }
 
 
   function wireChatEvents() {
@@ -1615,8 +1720,8 @@ ${catMeta.icon} «${fact.text}»
     });
 
     eventSource.on(event_types.MESSAGE_RECEIVED, async (idx) => {
-      // Очищаем одноразовый флешбек-промпт сразу после ответа модели
-      clearFlashbackPrompt();
+      // Сдвигаем очередь флешбеков — сработавший уходит в историю
+      consumeFlashQueue();
 
       const { chat } = ctx();
       const msg = chat?.[idx];
@@ -1632,7 +1737,7 @@ ${catMeta.icon} «${fact.text}»
       await renderWidget();
       // Авто-шанс флешбека: срабатывает при отправке сообщения юзером
       const s = getSettings();
-      if (!s.flashEnabled || !s.flashChance || flashbackPending) return;
+      if (!s.flashEnabled || !s.flashChance || flashQueue.length > 0) return;
       if (Math.random() * 100 < s.flashChance) await triggerFlashback();
     });
   }
