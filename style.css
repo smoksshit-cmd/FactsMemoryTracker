@@ -679,6 +679,52 @@
 
 .fmt-hint b { color: rgba(180,200,240,0.9); }
 
+/* ─── Flashback button (per-row) ────────────────────────────────── */
+
+.fmt-flash-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  color: transparent;
+  transition: color 0.13s, background 0.13s;
+}
+
+.fmt-fact-row:hover .fmt-flash-btn {
+  color: rgba(255,200,60,0.5);
+}
+
+.fmt-flash-btn:hover {
+  background: rgba(255,200,60,0.15) !important;
+  color: #ffd040 !important;
+}
+
+/* Highlight when fact is chosen for flashback */
+@keyframes fmt-flash-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255,200,60,0.5); }
+  60%  { box-shadow: 0 0 0 6px rgba(255,200,60,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,200,60,0); }
+}
+
+.fmt-flash-highlight {
+  border-color: rgba(255,200,60,0.5) !important;
+  background: rgba(255,200,60,0.08) !important;
+  animation: fmt-flash-pulse 0.7s ease-out 2;
+}
+
+/* Footer flashback button */
+#fmt_flashback_btn {
+  border-color: rgba(255,200,60,0.3) !important;
+  color: #ffd040 !important;
+}
+
+#fmt_flashback_btn:hover {
+  background: rgba(200,160,20,0.2) !important;
+}
+
 /* ─── Mobile ─────────────────────────────────────────────────────── */
 
 @media (max-width: 520px) {
