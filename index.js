@@ -37,19 +37,23 @@
   });
 
   const defaultSettings = Object.freeze({
-    enabled:         true,
-    showWidget:      true,
-    autoScan:        true,
-    autoScanEvery:   20,       // каждые N сообщений
-    scanDepth:       40,       // последние N сообщений для анализа
-    injectImportance: 'medium', // low | medium | high — порог инъекции
-    position:        EXT_PROMPT_TYPES.IN_PROMPT,
-    depth:           0,
-    apiEndpoint:     '',
-    apiKey:          '',
-    apiModel:        'gpt-4o-mini',
-    collapsed:       false,
+    enabled:          true,
+    showWidget:       true,
+    autoScan:         true,
+    autoScanEvery:    20,
+    scanDepth:        40,
+    injectImportance: 'medium',
+    position:         EXT_PROMPT_TYPES.IN_PROMPT,
+    depth:            0,
+    apiEndpoint:      '',
+    apiKey:           '',
+    apiModel:         'gpt-4o-mini',
+    collapsed:        false,
+    fabScale:         0.8,   // масштаб FAB (0.5 – 1.4)
   });
+
+  // Состояние свёрнутых категорий (не персистится — сбрасывается при открытии)
+  const collapsedCats = {};
 
   let lastFabDragTs  = 0;
   let scanInProgress = false;
@@ -388,7 +392,7 @@ ${chatText}
     const importanceOrder = { high: 2, medium: 1, low: 0 };
     const minScore = importanceOrder[threshold] ?? 1;
 
-    const filtered = state.facts.filter(f => (importanceOrder[f.importance] ?? 0) >= minScore);
+    const filtered = state.facts.filter(f => !f.disabled && (importanceOrder[f.importance] ?? 0) >= minScore);
     if (!filtered.length) return '';
 
     const grouped = {};
@@ -495,7 +499,18 @@ ${lines.join('\n')}
     saveFabPosPx(left, top);
   }
 
-  function ensureFab() {
+  function applyFabScale() {
+    const el = document.getElementById('fmt_fab_btn');
+    if (!el) return;
+    const scale = getSettings().fabScale ?? 0.8;
+    el.style.transform = `scale(${scale})`;
+    el.style.transformOrigin = 'center center';
+    // Подгоняем wrapper под реальный визуальный размер
+    const fab = document.getElementById('fmt_fab');
+    if (fab) fab.style.setProperty('--fab-scale', scale);
+  }
+
+
     if ($('#fmt_fab').length) return;
     $('body').append(`
       <div id="fmt_fab">
@@ -584,6 +599,7 @@ ${lines.join('\n')}
   async function renderWidget() {
     ensureFab();
     applyFabPosition();
+    applyFabScale();
     const s = getSettings();
     if (!s.showWidget) { $('#fmt_fab').hide(); return; }
     const state = await getChatState();
@@ -659,27 +675,28 @@ ${lines.join('\n')}
   }
 
   function activeFilters() {
-    const catBtn = $('.fmt-filter-btn[data-cat].active').data('cat') || 'all';
-    const impFilters = [];
-    $('.fmt-filter-btn[data-imp].active').each(function () { impFilters.push($(this).data('imp')); });
-    return { cat: catBtn, imp: impFilters };
+    const catEl = document.querySelector('.fmt-filter-btn[data-cat].active');
+    const cat   = catEl ? catEl.getAttribute('data-cat') : 'all';
+    const imp   = [];
+    document.querySelectorAll('.fmt-filter-btn[data-imp].active').forEach(el => imp.push(el.getAttribute('data-imp')));
+    return { cat, imp };
   }
 
   function applyFilters() {
     const { cat, imp } = activeFilters();
-    $('.fmt-fact-row').each(function () {
-      const el     = $(this);
-      const elCat  = el.data('cat');
-      const elImp  = el.data('imp');
-      const catOk  = cat === 'all' || elCat === cat;
-      const impOk  = imp.length === 0 || imp.includes(elImp);
-      el.toggle(catOk && impOk);
+    document.querySelectorAll('.fmt-fact-row').forEach(el => {
+      const elCat = el.getAttribute('data-cat');
+      const elImp = el.getAttribute('data-imp');
+      const catOk = cat === 'all' || elCat === cat;
+      const impOk = imp.length === 0 || imp.includes(elImp);
+      el.classList.toggle('fmt-row-hidden', !(catOk && impOk));
     });
-    // Показываем/скрываем заголовки категорий если все факты в них скрыты
-    $('.fmt-cat-section').each(function () {
-      const section = $(this);
-      const hasVisible = section.find('.fmt-fact-row:visible').length > 0;
-      section.toggle(hasVisible);
+    // Показываем/скрываем секции категорий
+    document.querySelectorAll('.fmt-cat-section').forEach(sec => {
+      const secCat = sec.getAttribute('data-cat');
+      const catOk  = cat === 'all' || secCat === cat;
+      const hasVisible = sec.querySelectorAll('.fmt-fact-row:not(.fmt-row-hidden)').length > 0;
+      sec.classList.toggle('fmt-row-hidden', !catOk || !hasVisible);
     });
   }
 
@@ -708,15 +725,18 @@ ${lines.join('\n')}
   }
 
   function renderFactRow(fact) {
-    const catMeta = CATEGORIES[fact.category] || CATEGORIES.events;
-    const impMeta = IMPORTANCE[fact.importance] || IMPORTANCE.medium;
-    const ts = new Date(fact.ts || 0).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    const catMeta  = CATEGORIES[fact.category] || CATEGORIES.events;
+    const impMeta  = IMPORTANCE[fact.importance] || IMPORTANCE.medium;
+    const ts       = new Date(fact.ts || 0).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    const disabled = !!fact.disabled;
     return `
-      <div class="fmt-fact-row" data-id="${fact.id}" data-cat="${fact.category}" data-imp="${fact.importance}">
+      <div class="fmt-fact-row${disabled ? ' fmt-fact-disabled' : ''}"
+           data-id="${fact.id}" data-cat="${fact.category}" data-imp="${fact.importance}">
         <span class="fmt-cat-icon" title="${escapeHtml(catMeta.label)}">${catMeta.icon}</span>
         <span class="fmt-imp-dot" title="${escapeHtml(impMeta.label)}" style="background:${impMeta.color}"></span>
         <span class="fmt-fact-text">${escapeHtml(fact.text)}</span>
         <span class="fmt-fact-date">${ts}</span>
+        <button class="fmt-toggle-btn" data-id="${fact.id}" title="${disabled ? 'Включить факт' : 'Отключить факт (не инжектировать)'}">${disabled ? '▶' : '⏸'}</button>
         <button class="fmt-delete-btn" data-id="${fact.id}" title="Удалить">✕</button>
       </div>`;
   }
@@ -727,18 +747,15 @@ ${lines.join('\n')}
     const settings = getSettings();
     const charName = getActiveCharName();
     const total    = state.facts.length;
+    const active   = state.facts.filter(f => !f.disabled).length;
 
-    $('#fmt_subtitle').text(`${charName} · ${total} фактов · авто-скан каждые ${settings.autoScanEvery} сообщ.`);
+    $('#fmt_subtitle').text(`${charName} · ${total} фактов (${active} активных) · авто-скан каждые ${settings.autoScanEvery} сообщ.`);
 
-    // Группируем по категориям
     const grouped = {};
     for (const cat of Object.keys(CATEGORIES)) grouped[cat] = [];
     for (const f of state.facts) { if (grouped[f.category]) grouped[f.category].push(f); }
 
-    let html = '';
-
-    // Блок добавления факта вручную
-    html += `
+    let html = `
       <div class="fmt-add-block">
         <input type="text" id="fmt_add_text" placeholder="Добавить факт вручную…" maxlength="120">
         <select id="fmt_add_cat">
@@ -756,22 +773,48 @@ ${lines.join('\n')}
       for (const [cat, meta] of Object.entries(CATEGORIES)) {
         const items = grouped[cat];
         if (!items.length) continue;
+        const isCollapsed = !!collapsedCats[cat];
+        const disabledInCat = items.filter(f => f.disabled).length;
         html += `
           <div class="fmt-cat-section" data-cat="${cat}">
-            <div class="fmt-cat-header">${meta.icon} ${meta.label} <span class="fmt-cat-count">${items.length}</span></div>
-            ${items.map(f => renderFactRow(f)).join('')}
+            <div class="fmt-cat-header" data-collapse-cat="${cat}">
+              <span class="fmt-cat-chevron">${isCollapsed ? '▸' : '▾'}</span>
+              ${meta.icon} ${meta.label}
+              <span class="fmt-cat-count">${items.length}${disabledInCat ? ` <span class="fmt-cat-dis">${disabledInCat} откл.</span>` : ''}</span>
+            </div>
+            <div class="fmt-cat-body${isCollapsed ? ' fmt-cat-collapsed' : ''}">
+              ${items.map(f => renderFactRow(f)).join('')}
+            </div>
           </div>`;
       }
     }
 
     $('#fmt_content').html(html);
 
-    // Обработчики
     $('#fmt_add_btn').on('click', addFactManual);
     $('#fmt_add_text').on('keydown', e => { if (e.key === 'Enter') addFactManual(); });
 
-    $(document).off('click.fmt_delete').on('click.fmt_delete', '.fmt-delete-btn', async function () {
-      await deleteFact($(this).data('id'));
+    // Collapse/expand category
+    $(document).off('click.fmt_collapse').on('click.fmt_collapse', '.fmt-cat-header', function () {
+      const cat   = $(this).attr('data-collapse-cat');
+      if (!cat) return;
+      collapsedCats[cat] = !collapsedCats[cat];
+      const body  = $(this).next('.fmt-cat-body');
+      const chev  = $(this).find('.fmt-cat-chevron');
+      body.toggleClass('fmt-cat-collapsed', collapsedCats[cat]);
+      chev.text(collapsedCats[cat] ? '▸' : '▾');
+    });
+
+    // Toggle disable
+    $(document).off('click.fmt_toggle').on('click.fmt_toggle', '.fmt-toggle-btn', async function (e) {
+      e.stopPropagation();
+      await toggleDisableFact($(this).attr('data-id'));
+    });
+
+    // Delete
+    $(document).off('click.fmt_delete').on('click.fmt_delete', '.fmt-delete-btn', async function (e) {
+      e.stopPropagation();
+      await deleteFact($(this).attr('data-id'));
     });
 
     applyFilters();
@@ -805,7 +848,24 @@ ${lines.join('\n')}
     await renderWidget();
   }
 
-  async function clearAllFacts() {
+  async function toggleDisableFact(id) {
+    const state = await getChatState();
+    const fact  = state.facts.find(f => f.id === id);
+    if (!fact) return;
+    fact.disabled = !fact.disabled;
+    await ctx().saveMetadata();
+    await updateInjectedPrompt();
+    // Обновляем только строку без полного ре-рендера
+    const row = document.querySelector(`.fmt-fact-row[data-id="${id}"]`);
+    if (row) {
+      row.classList.toggle('fmt-fact-disabled', fact.disabled);
+      const btn = row.querySelector('.fmt-toggle-btn');
+      if (btn) { btn.textContent = fact.disabled ? '▶' : '⏸'; btn.title = fact.disabled ? 'Включить факт' : 'Отключить факт'; }
+    }
+    await renderWidget();
+  }
+
+
     const { Popup } = ctx();
     const ok = await Popup.show.confirm('Очистить все факты?', 'Это действие нельзя отменить.');
     if (!ok) return;
@@ -846,6 +906,11 @@ ${lines.join('\n')}
               <input type="checkbox" id="fmt_show_widget" ${s.showWidget ? 'checked' : ''}>
               <span>Показывать виджет 🧠</span>
             </label>
+          </div>
+          <div class="fmt-srow fmt-slider-row">
+            <label>Размер виджета:</label>
+            <input type="range" id="fmt_fab_scale" min="0.4" max="1.4" step="0.1" value="${s.fabScale ?? 0.8}">
+            <span id="fmt_fab_scale_val">${Math.round((s.fabScale ?? 0.8) * 100)}%</span>
           </div>
           <div class="fmt-srow">
             <label class="checkbox_label">
@@ -932,6 +997,13 @@ ${lines.join('\n')}
     // Checkboxes
     $('#fmt_enabled').on('input',    async ev => { s.enabled    = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); await updateInjectedPrompt(); });
     $('#fmt_show_widget').on('input',async ev => { s.showWidget = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); await renderWidget(); });
+    $('#fmt_fab_scale').on('input', ev => {
+      const v = parseFloat($(ev.currentTarget).val());
+      s.fabScale = v;
+      $('#fmt_fab_scale_val').text(Math.round(v * 100) + '%');
+      ctx().saveSettingsDebounced();
+      applyFabScale();
+    });
     $('#fmt_auto_scan').on('input',       ev => { s.autoScan   = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); });
 
     // Sliders
