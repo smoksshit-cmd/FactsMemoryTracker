@@ -1,561 +1,1038 @@
-// ============================================================
-//  Memory Extractor — SillyTavern Extension v1.0
-// ============================================================
+/**
+ * Memory Extractor — SillyTavern Extension
+ * Извлекает важные факты из ролевого чата и инжектирует в контекст
+ * Архитектура: FAB-виджет + выдвижная панель + настройки в сайдбаре
+ */
 
-import {
-    getContext,
-    saveMetadataDebounced,
-    extension_settings,
-} from '../../../extensions.js';
+(() => {
+  'use strict';
 
-import {
-    eventSource,
-    event_types,
-    generateQuietPrompt,
-    chat_metadata,
-    setExtensionPrompt,
-} from '../../../../script.js';
+  const MODULE_KEY  = 'memory_extractor';
+  const PROMPT_TAG  = 'ME_MEMORY_BLOCK';
+  const FAB_POS_KEY = 'me_fab_pos_v1';
+  const FAB_MARGIN  = 8;
 
-const EXT_NAME   = 'memory-extractor';
-const PROMPT_KEY = 'MEMORY_EXTRACTOR';
-const META_KEY   = 'memory_extractor_facts';
+  let lastFabDragTs  = 0;
+  let isExtracting   = false;
+  let msgCounter     = 0;
 
-const DEFAULT_SETTINGS = {
-    enabled:          true,
-    triggerMode:      'auto',
-    triggerInterval:  10,
-    useCustomApi:     false,
-    apiUrl:           '',
-    apiKey:           '',
-    apiModel:         'gpt-4o-mini',
-    injectPosition:   'after_an',
-    injectCategories: { characters: true, events: true, secrets: true },
-    scanLastN:        20,
-};
+  const EXT_PROMPT_TYPES = Object.freeze({
+    NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2,
+  });
 
-let settings       = {};
-let messageCounter = 0;
-let isScanning     = false;
+  const CATS = Object.freeze({
+    characters : { label: 'Персонажи и отношения', icon: '👤', color: '#7eb8f7' },
+    events     : { label: 'События и последствия',  icon: '⚡', color: '#f7c97e' },
+    secrets    : { label: 'Секреты и скрытая инфа', icon: '🔒', color: '#c97ef7' },
+  });
 
-// ─── Init ────────────────────────────────────────────────────
-jQuery(async () => {
-    extension_settings[EXT_NAME] = extension_settings[EXT_NAME] || {};
-    settings = Object.assign({}, DEFAULT_SETTINGS, extension_settings[EXT_NAME]);
+  const DEFAULT_SETTINGS = Object.freeze({
+    enabled        : true,
+    showWidget     : true,
+    collapsed      : false,
+    api_mode       : 'st',      // 'st' | 'custom'
+    api_url        : '',
+    api_key        : '',
+    api_model      : 'gpt-4o-mini',
+    trigger_mode   : 'auto',   // 'auto' | 'manual'
+    trigger_every  : 10,
+    scan_last      : 20,
+    inject_position: EXT_PROMPT_TYPES.IN_PROMPT,
+    active_cats    : ['characters', 'events', 'secrets'],
+    total_scans    : 0,
+  });
 
-    $('#extensions_settings').append(buildSettingsHTML());
-    bindSettingsEvents();
-    renderSettingsValues();
+  /* ══════════════════════════════════════════════════════
+     ХЕЛПЕРЫ
+  ══════════════════════════════════════════════════════ */
 
-    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
-    eventSource.on(event_types.CHAT_CHANGED,     onChatChanged);
+  function ctx() { return SillyTavern.getContext(); }
 
-    console.log('[' + EXT_NAME + '] loaded');
-});
+  function getSettings() {
+    const { extensionSettings, saveSettingsDebounced } = ctx();
+    if (!extensionSettings[MODULE_KEY])
+      extensionSettings[MODULE_KEY] = structuredClone(DEFAULT_SETTINGS);
+    for (const k of Object.keys(DEFAULT_SETTINGS))
+      if (!Object.hasOwn(extensionSettings[MODULE_KEY], k))
+        extensionSettings[MODULE_KEY][k] = DEFAULT_SETTINGS[k];
+    return extensionSettings[MODULE_KEY];
+  }
 
-// ─── Hooks ───────────────────────────────────────────────────
-async function onMessageReceived() {
-    if (!settings.enabled || settings.triggerMode !== 'auto') return;
-    messageCounter++;
-    if (messageCounter >= settings.triggerInterval) {
-        messageCounter = 0;
-        await runExtraction();
+  function getChatKey() {
+    const c = ctx();
+    const chatId = (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() : null)
+                 || c.chatId || 'unknown';
+    const charId = c.characterId ?? c.groupId ?? 'unknown';
+    return `me_facts__${charId}__${chatId}`;
+  }
+
+  async function getFacts() {
+    const { chatMetadata, saveMetadata } = ctx();
+    const key = getChatKey();
+    if (!chatMetadata[key]) {
+      chatMetadata[key] = { characters: [], events: [], secrets: [] };
+      await saveMetadata();
     }
-}
+    return chatMetadata[key];
+  }
 
-function onChatChanged() {
-    messageCounter = 0;
-    renderFactsPanel();
-}
+  async function saveFacts(facts) {
+    const { chatMetadata, saveMetadata } = ctx();
+    chatMetadata[getChatKey()] = facts;
+    await saveMetadata();
+  }
 
-// ─── Core ────────────────────────────────────────────────────
-async function runExtraction() {
-    if (isScanning) return;
-    isScanning = true;
-    updateScanButton(true);
+  function makeId() {
+    return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
 
-    try {
-        const context      = getContext();
-        const chat         = context.chat || [];
-        const lastMessages = chat.slice(-settings.scanLastN);
-        if (!lastMessages.length) { isScanning = false; updateScanButton(false); return; }
+  function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+  function esc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+  }
 
-        const existingFacts = loadFacts();
-        const prompt        = buildExtractionPrompt(lastMessages, existingFacts);
+  function totalFacts(facts) {
+    return (facts?.characters?.length || 0)
+         + (facts?.events?.length     || 0)
+         + (facts?.secrets?.length    || 0);
+  }
 
-        let rawResponse;
-        if (settings.useCustomApi && settings.apiUrl && settings.apiKey) {
-            rawResponse = await callCustomApi(prompt);
-        } else {
-            rawResponse = await generateQuietPrompt(prompt, false, true);
+  function getRecentMessages(n = 20) {
+    const { chat } = ctx();
+    if (!Array.isArray(chat) || !chat.length) return '';
+    return chat.slice(-n).map(m => {
+      const who = m.is_user ? '{{user}}' : (m.name || '{{char}}');
+      return `${who}: ${(m.mes || '').trim()}`;
+    }).join('\n\n');
+  }
+
+  /* ══════════════════════════════════════════════════════
+     ВСПЛЫВАШКА
+  ══════════════════════════════════════════════════════ */
+
+  function xtoast(type, msg) {
+    try { toastr?.[type]?.(msg, 'Память', { timeOut: 3000, positionClass: 'toast-top-center' }); }
+    catch {}
+  }
+
+  /* ══════════════════════════════════════════════════════
+     ПРОМПТ-БЛОК
+  ══════════════════════════════════════════════════════ */
+
+  function buildPromptBlock(facts) {
+    const s = getSettings();
+    const chars   = (facts.characters || []).filter(f => s.active_cats.includes('characters'));
+    const events  = (facts.events     || []).filter(f => s.active_cats.includes('events'));
+    const secrets = (facts.secrets    || []).filter(f => s.active_cats.includes('secrets'));
+
+    if (!chars.length && !events.length && !secrets.length) return '';
+
+    const lines = ['[ПАМЯТЬ — важные факты из истории ролевой игры]'];
+
+    if (chars.length) {
+      lines.push('\nПЕРСОНАЖИ И ОТНОШЕНИЯ:');
+      chars.forEach(f => {
+        let line = `- ${f.name || '?'}`;
+        if (f.rel_type) line = `- ${f.from} ↔ ${f.to} [${f.rel_type}]${f.notes ? ': ' + f.notes : ''}`;
+        else {
+          if (f.status)       line += ` | статус: ${f.status}`;
+          if (f.location)     line += ` | локация: ${f.location}`;
+          if (f.traits?.length) line += ` | ${f.traits.join(', ')}`;
         }
-
-        const incoming = parseFactsResponse(rawResponse);
-        if (incoming) {
-            const merged = mergeFacts(existingFacts, incoming);
-            saveFacts(merged);
-            injectMemoryIntoContext(merged);
-            renderFactsPanel();
-            showToast('Memory updated: +' + countNew(incoming) + ' facts');
-        } else {
-            showToast('Nothing new found');
-        }
-    } catch (err) {
-        console.error('[' + EXT_NAME + '] Extraction error:', err);
-        showToast('Extraction failed — check console', true);
-    } finally {
-        isScanning = false;
-        updateScanButton(false);
+        lines.push(line);
+      });
     }
-}
-
-// ─── Prompt ──────────────────────────────────────────────────
-function buildExtractionPrompt(messages, existing) {
-    const chatText = messages
-        .map(function(m) { return '[' + (m.is_user ? 'User' : (m.name || 'Character')) + ']: ' + m.mes; })
-        .join('\n');
-
-    return 'You are a fact extractor for a roleplay session.\n\n' +
-        'RULES:\n' +
-        '1. Extract ONLY concrete, important facts — no filler, no interpretation\n' +
-        '2. EXISTING MEMORY is already stored — do NOT repeat any fact already there\n' +
-        '3. If a fact UPDATES an existing one (e.g. location changed) add to "updates"\n' +
-        '4. Respond ONLY with valid JSON — no markdown, no explanation\n\n' +
-        'EXISTING MEMORY:\n' + JSON.stringify(existing, null, 2) + '\n\n' +
-        'NEW MESSAGES:\n' + chatText + '\n\n' +
-        'Respond ONLY with this JSON:\n' +
-        '{\n' +
-        '  "new_facts": {\n' +
-        '    "characters": [{ "name": "", "aliases": [], "traits": [], "status": "", "location": "" }],\n' +
-        '    "relations":  [{ "from": "", "to": "", "type": "", "notes": "" }],\n' +
-        '    "events":     [{ "what": "", "who": [], "where": "", "consequence": "" }],\n' +
-        '    "secrets":    [{ "fact": "", "known_by": [], "hidden_from": [] }]\n' +
-        '  },\n' +
-        '  "updates": [{ "category": "", "match_name": "", "field": "", "new_value": "" }],\n' +
-        '  "nothing_new": false\n' +
-        '}';
-}
-
-// ─── Parser ───────────────────────────────────────────────────
-function parseFactsResponse(raw) {
-    try {
-        var clean  = raw.replace(/```json|```/gi, '').trim();
-        var parsed = JSON.parse(clean);
-        return parsed.nothing_new ? null : parsed;
-    } catch (e) {
-        console.warn('[' + EXT_NAME + '] Parse failed:', raw);
-        return null;
+    if (events.length) {
+      lines.push('\nСОБЫТИЯ:');
+      events.forEach(f => {
+        let line = `- ${f.what || '?'}`;
+        if (f.where)       line += ` (${f.where})`;
+        if (f.consequence) line += ` → ${f.consequence}`;
+        lines.push(line);
+      });
     }
-}
-
-// ─── Merge ───────────────────────────────────────────────────
-function mergeFacts(existing, incoming) {
-    var result = JSON.parse(JSON.stringify(existing));
-    result.characters = result.characters || [];
-    result.relations  = result.relations  || [];
-    result.events     = result.events     || [];
-    result.secrets    = result.secrets    || [];
-
-    (incoming.updates || []).forEach(function(upd) {
-        var arr = result[upd.category];
-        if (!arr) return;
-        var item = arr.find(function(i) { return i.name === upd.match_name || i.what === upd.match_name; });
-        if (item) item[upd.field] = upd.new_value;
-    });
-
-    var nf = incoming.new_facts || {};
-
-    (nf.characters || []).forEach(function(c) {
-        var ex = result.characters.find(function(x) {
-            return x.name && c.name && x.name.toLowerCase() === c.name.toLowerCase();
-        });
-        if (ex) {
-            ex.traits  = Array.from(new Set((ex.traits  || []).concat(c.traits  || [])));
-            ex.aliases = Array.from(new Set((ex.aliases || []).concat(c.aliases || [])));
-            if (c.status)   ex.status   = c.status;
-            if (c.location) ex.location = c.location;
-        } else {
-            c._id = uid();
-            result.characters.push(c);
-        }
-    });
-
-    (nf.relations || []).forEach(function(r) {
-        var key = (r.from + '|' + r.to + '|' + r.type).toLowerCase();
-        var dup = result.relations.find(function(x) {
-            return (x.from + '|' + x.to + '|' + x.type).toLowerCase() === key;
-        });
-        if (!dup) { r._id = uid(); result.relations.push(r); }
-    });
-
-    (nf.events || []).forEach(function(e) {
-        var dup = result.events.find(function(x) { return similarity(x.what, e.what) > 0.8; });
-        if (!dup) { e._id = uid(); result.events.push(e); }
-    });
-
-    (nf.secrets || []).forEach(function(s) {
-        var dup = result.secrets.find(function(x) { return similarity(x.fact, s.fact) > 0.8; });
-        if (!dup) { s._id = uid(); result.secrets.push(s); }
-    });
-
-    return result;
-}
-
-// ─── Storage ─────────────────────────────────────────────────
-function loadFacts() {
-    return chat_metadata[META_KEY] || { characters: [], relations: [], events: [], secrets: [] };
-}
-function saveFacts(facts) {
-    chat_metadata[META_KEY] = facts;
-    saveMetadataDebounced();
-}
-
-// ─── Inject ──────────────────────────────────────────────────
-function injectMemoryIntoContext(facts) {
-    var cfg   = settings.injectCategories;
-    var lines = ['[MEMORY EXTRACT]'];
-
-    if (cfg.characters) {
-        if (facts.characters && facts.characters.length) {
-            lines.push('## Characters');
-            facts.characters.slice(0, 10).forEach(function(c) {
-                var l = '* ' + c.name;
-                if (c.status)        l += ' [' + c.status + ']';
-                if (c.location)      l += ' @ ' + c.location;
-                if (c.traits && c.traits.length) l += ' — ' + c.traits.join(', ');
-                lines.push(l);
-            });
-        }
-        if (facts.relations && facts.relations.length) {
-            lines.push('## Relations');
-            facts.relations.slice(0, 10).forEach(function(r) {
-                lines.push('* ' + r.from + ' <-> ' + r.to + ': ' + r.type + (r.notes ? ' (' + r.notes + ')' : ''));
-            });
-        }
+    if (secrets.length) {
+      lines.push('\nСЕКРЕТЫ:');
+      secrets.forEach(f => {
+        let line = `- ${f.fact || '?'}`;
+        if (f.known_by?.length)    line += ` | знает: ${f.known_by.join(', ')}`;
+        if (f.hidden_from?.length) line += ` | скрыто от: ${f.hidden_from.join(', ')}`;
+        lines.push(line);
+      });
     }
 
-    if (cfg.events && facts.events && facts.events.length) {
-        lines.push('## Key Events');
-        facts.events.slice(0, 10).forEach(function(e) {
-            var l = '* ' + e.what;
-            if (e.where)       l += ' [' + e.where + ']';
-            if (e.consequence) l += ' -> ' + e.consequence;
-            lines.push(l);
-        });
+    lines.push('[/ПАМЯТЬ]');
+    return lines.join('\n');
+  }
+
+  async function updateInjectedPrompt() {
+    const s = getSettings();
+    const { setExtensionPrompt } = ctx();
+    if (!s.enabled) {
+      setExtensionPrompt(PROMPT_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true);
+      return;
     }
+    const facts = await getFacts();
+    setExtensionPrompt(PROMPT_TAG, buildPromptBlock(facts), s.inject_position, 0, true);
+  }
 
-    if (cfg.secrets && facts.secrets && facts.secrets.length) {
-        lines.push('## Hidden Info');
-        facts.secrets.slice(0, 10).forEach(function(s) {
-            var l = '* ' + s.fact;
-            if (s.hidden_from && s.hidden_from.length) l += ' (hidden from: ' + s.hidden_from.join(', ') + ')';
-            lines.push(l);
-        });
-    }
+  /* ══════════════════════════════════════════════════════
+     AI — ЗАПРОС К МОДЕЛИ
+  ══════════════════════════════════════════════════════ */
 
-    lines.push('[/MEMORY EXTRACT]');
+  function getBaseUrl() {
+    const s = getSettings();
+    return (s.api_url || '').trim()
+      .replace(/\/+$/, '')
+      .replace(/\/chat\/completions$/, '')
+      .replace(/\/v1$/, '');
+  }
 
-    var posMap = { after_an: 1, before_an: 0, top: -1 };
-    setExtensionPrompt(PROMPT_KEY, lines.join('\n'), posMap[settings.injectPosition] !== undefined ? posMap[settings.injectPosition] : 1, 0);
-}
+  async function aiGenerate(prompt) {
+    const s    = getSettings();
+    const base = getBaseUrl();
 
-// ─── Custom API ───────────────────────────────────────────────
-async function callCustomApi(prompt) {
-    var res = await fetch(settings.apiUrl + '/v1/chat/completions', {
-        method:  'POST',
+    if (s.api_mode === 'custom' && base && s.api_key) {
+      const resp = await fetch(`${base}/v1/chat/completions`, {
+        method : 'POST',
         headers: {
-            'Content-Type':  'application/json',
-            'Authorization': 'Bearer ' + settings.apiKey,
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${s.api_key}`,
         },
         body: JSON.stringify({
-            model:      settings.apiModel,
-            max_tokens: 1500,
-            messages:   [{ role: 'user', content: prompt }],
+          model      : s.api_model || 'gpt-4o-mini',
+          max_tokens : 2048,
+          temperature: 0.1,
+          messages   : [{ role: 'user', content: prompt }],
         }),
+      });
+      if (!resp.ok) throw new Error(`API ${resp.status}: ${await resp.text().catch(() => '')}`);
+      const data = await resp.json();
+      return data.choices?.[0]?.message?.content || '';
+    }
+
+    // ST встроенный
+    const c = ctx();
+    if (typeof c.generateRaw === 'function')
+      return await c.generateRaw(prompt, null, false, false, '', true);
+    throw new Error('Не задан свой API и нет встроенного generate в SillyTavern');
+  }
+
+  async function fetchModels() {
+    const base   = getBaseUrl();
+    const apiKey = (getSettings().api_key || '').trim();
+    if (!base || !apiKey) throw new Error('Укажи URL и API-ключ');
+    const resp = await fetch(`${base}/v1/models`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
     });
-    if (!res.ok) throw new Error('API ' + res.status + ': ' + (await res.text()));
-    var data = await res.json();
-    return (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content)
-        || (data && data.content && data.content[0] && data.content[0].text)
-        || '';
-}
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    return (data.data || data.models || [])
+      .map(m => (typeof m === 'string' ? m : m.id))
+      .filter(Boolean).sort();
+  }
 
-// ─── Settings HTML ────────────────────────────────────────────
-function buildSettingsHTML() {
-    return '<div id="mem-ext-settings" class="mem-ext-panel">' +
-        '<div class="mem-ext-header" id="mem-ext-toggle-btn">' +
-            '<span>&#x1F9E0; Memory Extractor</span>' +
-            '<span class="mem-ext-chevron">&#9662;</span>' +
-        '</div>' +
-        '<div class="mem-ext-body" id="mem-ext-body">' +
+  /* ══════════════════════════════════════════════════════
+     ПРОМПТ ИЗВЛЕЧЕНИЯ
+  ══════════════════════════════════════════════════════ */
 
-            // Status bar
-            '<div class="mem-statusbar">' +
-                '<label class="mem-switch"><input type="checkbox" id="mem-enabled"><span class="mem-slider"></span></label>' +
-                '<span class="mem-status-lbl" id="mem-status-lbl">Enabled</span>' +
-                '<button id="mem-scan-btn" class="mem-btn mem-btn-primary">&#9889; Scan Now</button>' +
-                '<button id="mem-clear-btn" class="mem-btn mem-btn-danger">&#x1F5D1; Clear</button>' +
-            '</div>' +
+  function buildExtractionPrompt(messages, existing) {
+    const existingLines = [];
+    if (existing.characters?.length) {
+      existingLines.push('ПЕРСОНАЖИ:');
+      existing.characters.forEach(f => existingLines.push(
+        `  [${f.id}] ${f.name} | статус:${f.status||'?'} | локация:${f.location||'?'}${f.rel_type ? ` | ↔ ${f.from}/${f.to}: ${f.rel_type}` : ''}`
+      ));
+    }
+    if (existing.events?.length) {
+      existingLines.push('СОБЫТИЯ:');
+      existing.events.forEach(f => existingLines.push(`  [${f.id}] ${f.what} → ${f.consequence||'?'}`));
+    }
+    if (existing.secrets?.length) {
+      existingLines.push('СЕКРЕТЫ:');
+      existing.secrets.forEach(f => existingLines.push(`  [${f.id}] ${f.fact} | знает: ${(f.known_by||[]).join(', ')}`));
+    }
+    const existingBlock = existingLines.length
+      ? `\nУЖЕ ИЗВЕСТНЫЕ ФАКТЫ (не дублировать, даже другими словами):\n${existingLines.join('\n')}\n`
+      : '';
 
-            // Tabs
-            '<div class="mem-tabs">' +
-                '<button class="mem-tab active" data-tab="facts">&#x1F4CB; Facts</button>' +
-                '<button class="mem-tab" data-tab="trigger">&#x2699; Trigger</button>' +
-                '<button class="mem-tab" data-tab="api">&#x1F50C; API</button>' +
-                '<button class="mem-tab" data-tab="inject">&#x1F4E5; Inject</button>' +
-            '</div>' +
+    return `Ты — система извлечения фактов для ролевой игры. Анализируй диалог и извлекай ТОЛЬКО важные, конкретные факты.
 
-            // FACTS TAB
-            '<div class="mem-tab-content active" id="tab-facts">' +
-                '<div class="mem-filters">' +
-                    '<button class="mem-filter active" data-filter="all">All</button>' +
-                    '<button class="mem-filter" data-filter="characters">&#x1F464; Chars</button>' +
-                    '<button class="mem-filter" data-filter="relations">&#x1F517; Relations</button>' +
-                    '<button class="mem-filter" data-filter="events">&#x26A1; Events</button>' +
-                    '<button class="mem-filter" data-filter="secrets">&#x1F510; Secrets</button>' +
-                '</div>' +
-                '<div id="mem-facts-list" class="mem-facts-list"><div class="mem-empty">No facts yet &mdash; click Scan Now</div></div>' +
-            '</div>' +
+ПРАВИЛА:
+1. Только факты из текста — без домыслов
+2. Если факт уже есть в памяти — пропусти (НЕ ДУБЛИРУЙ)
+3. Если факт обновляет старый — добавь в updates с update_id старого факта
+4. Пустые категории — пустые массивы []
+5. Отвечай ТОЛЬКО валидным JSON — никакого текста вокруг, никаких markdown-блоков${existingBlock}
 
-            // TRIGGER TAB
-            '<div class="mem-tab-content" id="tab-trigger">' +
-                '<div class="mem-field"><label>Trigger mode</label>' +
-                    '<select id="mem-trigger-mode"><option value="auto">Auto (every N messages)</option><option value="manual">Manual only</option></select>' +
-                '</div>' +
-                '<div class="mem-field" id="mem-interval-wrap"><label>Every <span id="mem-interval-val">10</span> messages</label>' +
-                    '<input type="range" id="mem-trigger-interval" min="5" max="50" step="5" value="10">' +
-                '</div>' +
-                '<div class="mem-field"><label>Messages to scan per run</label>' +
-                    '<input type="number" id="mem-scan-last" min="5" max="100" value="20">' +
-                '</div>' +
-            '</div>' +
+СООБЩЕНИЯ ДЛЯ АНАЛИЗА:
+${messages}
 
-            // API TAB
-            '<div class="mem-tab-content" id="tab-api">' +
-                '<div class="mem-field"><label>API source</label>' +
-                    '<select id="mem-api-source"><option value="st">Current ST connection</option><option value="custom">Custom API (own key)</option></select>' +
-                '</div>' +
-                '<div id="mem-custom-api-fields" style="display:none">' +
-                    '<div class="mem-field"><label>Base URL</label><input type="text" id="mem-api-url" placeholder="https://api.openai.com"></div>' +
-                    '<div class="mem-field"><label>API Key</label><input type="password" id="mem-api-key" placeholder="sk-..."></div>' +
-                    '<div class="mem-field"><label>Model</label><input type="text" id="mem-api-model" placeholder="gpt-4o-mini"></div>' +
-                '</div>' +
-                '<p class="mem-hint">Any OpenAI-compatible or Anthropic-compatible endpoint works.</p>' +
-            '</div>' +
+ФОРМАТ ОТВЕТА:
+{
+  "characters": [
+    { "id": "char_имя", "name": "Имя", "aliases": [], "traits": [], "status": "жив/мёртв/неизвестно", "location": "где", "type": "new" }
+  ],
+  "relations": [
+    { "id": "rel_id", "from": "Персонаж А", "to": "Персонаж Б", "rel_type": "союзники/враги/и т.д.", "notes": "", "type": "new" }
+  ],
+  "events": [
+    { "id": "ev_id", "what": "Что произошло", "who": [], "where": "место", "consequence": "последствие", "type": "new" }
+  ],
+  "secrets": [
+    { "id": "sec_id", "fact": "Секрет", "known_by": [], "hidden_from": [], "type": "new" }
+  ],
+  "updates": [
+    { "update_id": "id_факта", "cat": "characters/events/secrets", "field": "поле", "new_value": "новое значение" }
+  ]
+}`;
+  }
 
-            // INJECT TAB
-            '<div class="mem-tab-content" id="tab-inject">' +
-                '<div class="mem-field"><label>Inject position</label>' +
-                    '<select id="mem-inject-pos">' +
-                        '<option value="after_an">After Author\'s Note</option>' +
-                        '<option value="before_an">Before Author\'s Note</option>' +
-                        '<option value="top">Top of context</option>' +
-                    '</select>' +
-                '</div>' +
-                '<div class="mem-field"><label>What to inject</label>' +
-                    '<div class="mem-checks">' +
-                        '<label><input type="checkbox" id="inj-characters"> Characters &amp; Relations</label>' +
-                        '<label><input type="checkbox" id="inj-events"> Events</label>' +
-                        '<label><input type="checkbox" id="inj-secrets"> Secrets</label>' +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
+  /* ══════════════════════════════════════════════════════
+     ПАРСИНГ И МЁРЖ
+  ══════════════════════════════════════════════════════ */
 
-        '</div>' +
-    '</div>';
-}
+  function parseJSON(raw) {
+    if (!raw) return null;
+    try {
+      const clean = raw.replace(/```json|```/gi, '').trim();
+      const s = clean.indexOf('{'), e = clean.lastIndexOf('}');
+      if (s < 0 || e < 0) return null;
+      return JSON.parse(clean.slice(s, e + 1));
+    } catch (err) {
+      console.warn('[ME] JSON parse error:', err);
+      return null;
+    }
+  }
 
-// ─── Settings Events ──────────────────────────────────────────
-function bindSettingsEvents() {
-    $('#mem-ext-toggle-btn').on('click', function() {
-        var $body = $('#mem-ext-body');
-        $body.toggleClass('collapsed');
-        $('#mem-ext-toggle-btn .mem-ext-chevron').text($body.hasClass('collapsed') ? '\u25B8' : '\u25BE');
-    });
+  function normStr(s) {
+    return String(s).toLowerCase().replace(/[^\wа-яёa-z0-9\s]/gi, '').replace(/\s+/g,' ').trim();
+  }
 
-    $(document).on('click', '.mem-tab', function() {
-        $('.mem-tab').removeClass('active');
-        $('.mem-tab-content').removeClass('active');
-        $(this).addClass('active');
-        $('#tab-' + $(this).data('tab')).addClass('active');
-    });
+  function similarity(a, b) {
+    const na = normStr(a), nb = normStr(b);
+    if (na.includes(nb) || nb.includes(na)) return 1;
+    const wa = new Set(na.split(' ').filter(w => w.length >= 4));
+    const wb = new Set(nb.split(' ').filter(w => w.length >= 4));
+    if (!wa.size && !wb.size) return na === nb ? 1 : 0;
+    let common = 0;
+    for (const w of wa) if (wb.has(w)) common++;
+    return common / Math.max(wa.size, wb.size);
+  }
 
-    $(document).on('click', '.mem-filter', function() {
-        $('.mem-filter').removeClass('active');
-        $(this).addClass('active');
-        renderFactsPanel($(this).data('filter'));
-    });
+  function mergeFacts(existing, parsed) {
+    const merged = {
+      characters : [...(existing.characters || [])],
+      events     : [...(existing.events     || [])],
+      secrets    : [...(existing.secrets    || [])],
+    };
 
-    $('#mem-enabled').on('change', function() {
-        settings.enabled = this.checked;
-        $('#mem-status-lbl').text(this.checked ? 'Enabled' : 'Disabled');
-        saveSettings();
-    });
+    // Применяем обновления
+    if (parsed.updates?.length) {
+      for (const upd of parsed.updates) {
+        const arr = merged[upd.cat];
+        if (!arr) continue;
+        const item = arr.find(i => i.id === upd.update_id);
+        if (item) item[upd.field] = upd.new_value;
+      }
+    }
 
-    $('#mem-scan-btn').on('click', function() { runExtraction(); });
-
-    $('#mem-clear-btn').on('click', function() {
-        if (!confirm('Clear all memory for this chat?')) return;
-        saveFacts({ characters: [], relations: [], events: [], secrets: [] });
-        setExtensionPrompt(PROMPT_KEY, '');
-        renderFactsPanel();
-        showToast('Memory cleared');
-    });
-
-    $('#mem-trigger-mode').on('change', function() {
-        settings.triggerMode = this.value;
-        $('#mem-interval-wrap').toggle(this.value === 'auto');
-        saveSettings();
-    });
-
-    $('#mem-trigger-interval').on('input', function() {
-        settings.triggerInterval = parseInt(this.value);
-        $('#mem-interval-val').text(this.value);
-        saveSettings();
-    });
-
-    $('#mem-scan-last').on('change',   function() { settings.scanLastN = parseInt(this.value);  saveSettings(); });
-    $('#mem-api-url').on('change',     function() { settings.apiUrl    = this.value.trim();     saveSettings(); });
-    $('#mem-api-key').on('change',     function() { settings.apiKey    = this.value.trim();     saveSettings(); });
-    $('#mem-api-model').on('change',   function() { settings.apiModel  = this.value.trim();     saveSettings(); });
-    $('#mem-inject-pos').on('change',  function() { settings.injectPosition = this.value;       saveSettings(); });
-
-    $('#mem-api-source').on('change', function() {
-        settings.useCustomApi = this.value === 'custom';
-        $('#mem-custom-api-fields').toggle(settings.useCustomApi);
-        saveSettings();
-    });
-
-    $('#inj-characters').on('change', function() { settings.injectCategories.characters = this.checked; saveSettings(); });
-    $('#inj-events').on('change',     function() { settings.injectCategories.events     = this.checked; saveSettings(); });
-    $('#inj-secrets').on('change',    function() { settings.injectCategories.secrets    = this.checked; saveSettings(); });
-
-    $(document).on('click', '.mem-fact-delete', function() {
-        var id    = $(this).data('id');
-        var cat   = $(this).data('cat');
-        var facts = loadFacts();
-        facts[cat] = (facts[cat] || []).filter(function(f) { return f._id !== id; });
-        saveFacts(facts);
-        injectMemoryIntoContext(facts);
-        renderFactsPanel($('.mem-filter.active').data('filter') || 'all');
-    });
-}
-
-function renderSettingsValues() {
-    $('#mem-enabled').prop('checked', settings.enabled);
-    $('#mem-status-lbl').text(settings.enabled ? 'Enabled' : 'Disabled');
-    $('#mem-trigger-mode').val(settings.triggerMode);
-    $('#mem-trigger-interval').val(settings.triggerInterval);
-    $('#mem-interval-val').text(settings.triggerInterval);
-    $('#mem-scan-last').val(settings.scanLastN);
-    $('#mem-api-source').val(settings.useCustomApi ? 'custom' : 'st');
-    $('#mem-custom-api-fields').toggle(settings.useCustomApi);
-    $('#mem-api-url').val(settings.apiUrl);
-    $('#mem-api-key').val(settings.apiKey);
-    $('#mem-api-model').val(settings.apiModel);
-    $('#mem-inject-pos').val(settings.injectPosition);
-    $('#mem-interval-wrap').toggle(settings.triggerMode === 'auto');
-    $('#inj-characters').prop('checked', settings.injectCategories.characters);
-    $('#inj-events').prop('checked',     settings.injectCategories.events);
-    $('#inj-secrets').prop('checked',    settings.injectCategories.secrets);
-    renderFactsPanel();
-}
-
-function saveSettings() {
-    Object.assign(extension_settings[EXT_NAME], settings);
-    saveMetadataDebounced();
-}
-
-// ─── Facts Renderer ───────────────────────────────────────────
-function renderFactsPanel(filter) {
-    if (!filter) filter = 'all';
-    var facts = loadFacts();
-    var $list = $('#mem-facts-list');
-    $list.empty();
-
-    var sections = [
-        { key: 'characters', label: 'Characters', items: facts.characters || [] },
-        { key: 'relations',  label: 'Relations',  items: facts.relations  || [] },
-        { key: 'events',     label: 'Events',     items: facts.events     || [] },
-        { key: 'secrets',    label: 'Secrets',    items: facts.secrets    || [] },
+    const SIM = 0.45;
+    const pool = [
+      ...merged.characters.map(f => f.text || f.name || ''),
+      ...merged.events.map(f => f.what || ''),
+      ...merged.secrets.map(f => f.fact || ''),
     ];
 
-    var total = 0;
+    function isDup(text) {
+      return pool.some(ex => similarity(ex, text) >= SIM);
+    }
 
-    sections.forEach(function(sec) {
-        if (filter !== 'all' && filter !== sec.key) return;
-        if (!sec.items.length) return;
+    function addIfNew(cat, item, textKey) {
+      if (!item) return false;
+      if (!item.id) item.id = cat.slice(0, 3) + '_' + Math.random().toString(36).slice(2, 7);
+      const text = item[textKey] || item.name || '';
+      if (!text || isDup(text)) return false;
+      merged[cat].unshift(item);
+      pool.push(text);
+      return true;
+    }
 
-        var $sec = $('<div class="mem-section"><div class="mem-section-title">' + sec.label + ' <span class="mem-count">' + sec.items.length + '</span></div></div>');
+    let newCount = 0;
+    (parsed.characters || []).forEach(f => { if (addIfNew('characters', f, 'name'))     newCount++; });
+    (parsed.relations  || []).forEach(f => {
+      const merged_item = { ...f, name: `${f.from} ↔ ${f.to}` };
+      if (addIfNew('characters', merged_item, 'name')) newCount++;
+    });
+    (parsed.events  || []).forEach(f => { if (addIfNew('events',  f, 'what')) newCount++; });
+    (parsed.secrets || []).forEach(f => { if (addIfNew('secrets', f, 'fact')) newCount++; });
 
-        sec.items.forEach(function(item) {
-            $sec.append(
-                '<div class="mem-fact">' +
-                    '<span class="mem-fact-text">' + formatFact(sec.key, item) + '</span>' +
-                    '<button class="mem-fact-delete" data-id="' + item._id + '" data-cat="' + sec.key + '" title="Delete">&#x2715;</button>' +
-                '</div>'
-            );
-            total++;
-        });
+    return { merged, newCount };
+  }
 
-        $list.append($sec);
+  /* ══════════════════════════════════════════════════════
+     ОСНОВНОЕ — СКАНИРОВАНИЕ
+  ══════════════════════════════════════════════════════ */
+
+  async function runExtraction() {
+    if (isExtracting) { xtoast('warning', 'Сканирование уже идёт…'); return; }
+    if (!getSettings().enabled) { xtoast('warning', 'Расширение отключено'); return; }
+
+    const { chat } = ctx();
+    if (!Array.isArray(chat) || chat.length < 2) { xtoast('warning', 'Чат слишком короткий'); return; }
+
+    isExtracting = true;
+    const $btn = $('#me_scan_btn, #me_scan_drawer_btn');
+    $btn.prop('disabled', true).text('⏳ Анализ…');
+    updateStatus('⏳ Извлечение фактов…', 'info');
+
+    try {
+      const existing = await getFacts();
+      const messages = getRecentMessages(getSettings().scan_last);
+      const prompt   = buildExtractionPrompt(messages, existing);
+      const raw      = await aiGenerate(prompt);
+      const parsed   = parseJSON(raw);
+
+      if (!parsed) {
+        updateStatus('⚠️ Не удалось разобрать ответ модели', 'warn');
+        xtoast('warning', 'Не удалось разобрать ответ модели');
+        return;
+      }
+
+      const { merged, newCount } = mergeFacts(existing, parsed);
+      merged._total_scans = (existing._total_scans || 0) + 1;
+      getSettings().total_scans = merged._total_scans;
+      ctx().saveSettingsDebounced();
+
+      await saveFacts(merged);
+      await updateInjectedPrompt();
+      await renderWidget();
+      if ($('#me_drawer').hasClass('me-open')) await renderDrawerContent();
+
+      updateStatus(`✅ Готово! Новых фактов: ${newCount}`, 'success');
+      xtoast('success', `Извлечено новых фактов: ${newCount}`);
+
+    } catch (err) {
+      console.error('[ME] extraction error:', err);
+      updateStatus(`❌ Ошибка: ${err.message}`, 'error');
+      xtoast('error', 'Ошибка: ' + err.message);
+    } finally {
+      isExtracting = false;
+      $btn.prop('disabled', false).text('🔍 Сканировать чат');
+    }
+  }
+
+  function updateStatus(msg, type) {
+    const colors = { info:'#94a3b8', success:'#34d399', warn:'#fbbf24', error:'#f87171' };
+    $('#me_status_line').css('color', colors[type] || colors.info).text(msg);
+  }
+
+  /* ══════════════════════════════════════════════════════
+     FAB — перетаскиваемый виджет
+     Архитектура: точная копия подхода из SRT
+  ══════════════════════════════════════════════════════ */
+
+  function vpW() { return window.visualViewport?.width  || window.innerWidth;  }
+  function vpH() { return window.visualViewport?.height || window.innerHeight; }
+
+  function getFabSize() {
+    const el = document.getElementById('me_fab');
+    if (el && el.offsetWidth > 0) return { W: el.offsetWidth, H: el.offsetHeight };
+    return { W: 58, H: 58 };
+  }
+
+  function clampFabPos(left, top) {
+    const { W, H } = getFabSize();
+    return {
+      left: clamp(left, FAB_MARGIN, Math.max(FAB_MARGIN, vpW() - W - FAB_MARGIN)),
+      top : clamp(top,  FAB_MARGIN, Math.max(FAB_MARGIN, vpH() - H - FAB_MARGIN)),
+    };
+  }
+
+  function saveFabPos(left, top) {
+    const { W, H } = getFabSize();
+    const clamped = clampFabPos(left, top);
+    const rangeX  = Math.max(1, vpW() - W - FAB_MARGIN * 2);
+    const rangeY  = Math.max(1, vpH() - H - FAB_MARGIN * 2);
+    try {
+      localStorage.setItem(FAB_POS_KEY, JSON.stringify({
+        x: clamp01((clamped.left - FAB_MARGIN) / rangeX),
+        y: clamp01((clamped.top  - FAB_MARGIN) / rangeY),
+        left: clamped.left, top: clamped.top,
+      }));
+    } catch {}
+  }
+
+  function applyFabPos() {
+    const el = document.getElementById('me_fab');
+    if (!el) return;
+    el.style.transform = 'none';
+    el.style.right = el.style.bottom = 'auto';
+    const { W, H } = getFabSize();
+    try {
+      const raw = localStorage.getItem(FAB_POS_KEY);
+      if (!raw) { setFabDefault(); return; }
+      const pos = JSON.parse(raw);
+      let left, top;
+      if (typeof pos.x === 'number') {
+        left = Math.round(pos.x * (vpW() - W - FAB_MARGIN * 2)) + FAB_MARGIN;
+        top  = Math.round(pos.y * (vpH() - H - FAB_MARGIN * 2)) + FAB_MARGIN;
+      } else { left = pos.left || 0; top = pos.top || 0; }
+      const c = clampFabPos(left, top);
+      el.style.left = c.left + 'px';
+      el.style.top  = c.top  + 'px';
+    } catch { setFabDefault(); }
+  }
+
+  function setFabDefault() {
+    const el = document.getElementById('me_fab');
+    if (!el) return;
+    const { W, H } = getFabSize();
+    const left = clamp(vpW() - W - FAB_MARGIN, FAB_MARGIN, vpW() - W - FAB_MARGIN);
+    const top  = clamp(Math.round((vpH() - H) / 2), FAB_MARGIN, vpH() - H - FAB_MARGIN);
+    el.style.left = left + 'px';
+    el.style.top  = top  + 'px';
+    el.style.right = el.style.bottom = 'auto';
+    saveFabPos(left, top);
+  }
+
+  function ensureFab() {
+    if (document.getElementById('me_fab')) return;
+    document.body.insertAdjacentHTML('beforeend', `
+      <div id="me_fab">
+        <button type="button" id="me_fab_btn" title="Открыть память">
+          <div class="me-fab-icon">🧠</div>
+          <div class="me-fab-counts">
+            <span id="me_fab_count">0</span> фактов
+          </div>
+        </button>
+        <button type="button" id="me_fab_hide" title="Скрыть виджет">✕</button>
+      </div>
+    `);
+
+    document.getElementById('me_fab_btn').addEventListener('click', ev => {
+      if (Date.now() - lastFabDragTs < 350) { ev.preventDefault(); ev.stopPropagation(); return; }
+      openDrawer(true);
     });
 
-    if (!total) $list.html('<div class="mem-empty">Nothing here yet.</div>');
-}
+    document.getElementById('me_fab_hide').addEventListener('click', async () => {
+      getSettings().showWidget = false;
+      ctx().saveSettingsDebounced();
+      document.getElementById('me_fab').style.display = 'none';
+      xtoast('info', 'Виджет скрыт — включите в настройках расширения');
+    });
 
-function formatFact(cat, item) {
-    if (cat === 'characters') {
-        var s = '<b>' + (item.name || '') + '</b>';
-        if (item.status)         s += ' <em>[' + item.status + ']</em>';
-        if (item.location)       s += ' @ ' + item.location;
-        if (item.traits && item.traits.length) s += '<br><small>' + item.traits.join(', ') + '</small>';
-        return s;
+    initFabDrag();
+    applyFabPos();
+
+    let resizeTimer = null;
+    const onResize = () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(applyFabPos, 200); };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(applyFabPos, 350); });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+  }
+
+  function initFabDrag() {
+    const fab    = document.getElementById('me_fab');
+    const handle = document.getElementById('me_fab_btn');
+    if (!fab || !handle || fab.dataset.dragInit) return;
+    fab.dataset.dragInit = '1';
+
+    let sx, sy, sl, st, moved = false;
+
+    const onMove = ev => {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (!moved && Math.abs(dx) + Math.abs(dy) > 6) { moved = true; fab.classList.add('me-dragging'); }
+      if (!moved) return;
+      const c = clampFabPos(sl + dx, st + dy);
+      fab.style.left = c.left + 'px';
+      fab.style.top  = c.top  + 'px';
+      fab.style.right = fab.style.bottom = 'auto';
+      ev.preventDefault(); ev.stopPropagation();
+    };
+
+    const onEnd = ev => {
+      try { handle.releasePointerCapture(ev.pointerId); } catch {}
+      document.removeEventListener('pointermove', onMove, { passive: false });
+      document.removeEventListener('pointerup',   onEnd);
+      document.removeEventListener('pointercancel', onEnd);
+      if (moved) { saveFabPos(parseInt(fab.style.left)||0, parseInt(fab.style.top)||0); lastFabDragTs = Date.now(); }
+      moved = false;
+      fab.classList.remove('me-dragging');
+    };
+
+    handle.addEventListener('pointerdown', ev => {
+      if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+      const c = clampFabPos(parseInt(fab.style.left)||0, parseInt(fab.style.top)||0);
+      fab.style.left = c.left + 'px'; fab.style.top = c.top + 'px';
+      fab.style.right = fab.style.bottom = 'auto'; fab.style.transform = 'none';
+      sx = ev.clientX; sy = ev.clientY; sl = c.left; st = c.top;
+      moved = false;
+      try { handle.setPointerCapture(ev.pointerId); } catch {}
+      document.addEventListener('pointermove', onMove, { passive: false });
+      document.addEventListener('pointerup',   onEnd);
+      document.addEventListener('pointercancel', onEnd);
+      ev.preventDefault(); ev.stopPropagation();
+    }, { passive: false });
+  }
+
+  async function renderWidget() {
+    const s = getSettings();
+    ensureFab();
+    applyFabPos();
+    const fab = document.getElementById('me_fab');
+    if (!fab) return;
+    fab.style.display = (s.showWidget && s.enabled) ? '' : 'none';
+    const facts = await getFacts();
+    const n = totalFacts(facts);
+    document.getElementById('me_fab_count').textContent = n;
+  }
+
+  /* ══════════════════════════════════════════════════════
+     DRAWER — выдвижная панель
+  ══════════════════════════════════════════════════════ */
+
+  function ensureDrawer() {
+    if (document.getElementById('me_drawer')) return;
+    document.body.insertAdjacentHTML('beforeend', `
+      <aside id="me_drawer" aria-hidden="true">
+        <header>
+          <div class="me-head-top">
+            <div class="me-head-title">🧠 ПАМЯТЬ</div>
+            <button type="button" id="me_drawer_close" title="Закрыть">✕</button>
+          </div>
+          <div class="me-head-sub" id="me_drawer_sub"></div>
+        </header>
+        <div class="me-drawer-body" id="me_drawer_body"></div>
+        <footer class="me-drawer-foot">
+          <button type="button" id="me_scan_drawer_btn">🔍 Сканировать чат</button>
+          <button type="button" id="me_clear_drawer_btn">🗑 Очистить память</button>
+          <button type="button" id="me_close_drawer_btn2">Закрыть</button>
+        </footer>
+      </aside>
+    `);
+
+    document.getElementById('me_drawer_close').addEventListener('click',  () => openDrawer(false), true);
+    document.getElementById('me_close_drawer_btn2').addEventListener('click', () => openDrawer(false), true);
+    document.getElementById('me_scan_drawer_btn').addEventListener('click', () => runExtraction());
+    document.getElementById('me_clear_drawer_btn').addEventListener('click', async () => {
+      if (confirm('Очистить всю память для этого чата?')) {
+        await saveFacts({ characters: [], events: [], secrets: [] });
+        await updateInjectedPrompt();
+        await renderWidget();
+        await renderDrawerContent();
+        xtoast('info', 'Память очищена');
+      }
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && document.getElementById('me_drawer')?.classList.contains('me-open'))
+        openDrawer(false);
+    });
+  }
+
+  function openDrawer(open) {
+    ensureDrawer();
+    const drawer = document.getElementById('me_drawer');
+    if (!drawer) return;
+
+    if (open) {
+      if (!document.getElementById('me_overlay')) {
+        const ov = document.createElement('div');
+        ov.id = 'me_overlay';
+        document.body.insertBefore(ov, drawer);
+        ov.addEventListener('click', () => openDrawer(false), true);
+        ov.addEventListener('touchstart', e => { e.preventDefault(); openDrawer(false); }, { passive: false, capture: true });
+      }
+      document.getElementById('me_overlay').style.display = 'block';
+      drawer.classList.add('me-open');
+      drawer.setAttribute('aria-hidden', 'false');
+      renderDrawerContent();
+    } else {
+      drawer.classList.remove('me-open');
+      drawer.setAttribute('aria-hidden', 'true');
+      const ov = document.getElementById('me_overlay');
+      if (ov) ov.style.display = 'none';
     }
-    if (cat === 'relations') {
-        return '<b>' + item.from + '</b> &harr; <b>' + item.to + '</b>: ' + item.type + (item.notes ? '<br><small>' + item.notes + '</small>' : '');
+  }
+
+  let drawerCat = 'all', drawerQuery = '';
+
+  async function renderDrawerContent() {
+    const facts = await getFacts();
+    const total = totalFacts(facts);
+    document.getElementById('me_drawer_sub').textContent = `Всего фактов: ${total}`;
+
+    const tabHtml = [
+      { id: 'all', label: 'Все', icon: '🗂' },
+      ...Object.entries(CATS).map(([id, v]) => ({ id, label: v.label, icon: v.icon })),
+    ].map(t => `<button class="me-tab${drawerCat === t.id ? ' me-active' : ''}" data-cat="${t.id}">${t.icon} ${t.label}</button>`).join('');
+
+    const html = `
+      <div class="me-drawer-filters">${tabHtml}</div>
+      <div class="me-drawer-search">
+        <input id="me_drawer_search" type="text" placeholder="🔍 Поиск по фактам…" value="${esc(drawerQuery)}">
+      </div>
+      <div class="me-facts-list" id="me_facts_list"></div>
+      <div class="me-add-block">
+        <div class="me-add-title">➕ Добавить факт вручную</div>
+        <select id="me_add_cat">
+          ${Object.entries(CATS).map(([id, v]) => `<option value="${id}">${v.icon} ${v.label}</option>`).join('')}
+        </select>
+        <input type="text" id="me_add_text" placeholder="Текст факта…">
+        <button id="me_add_btn">Добавить</button>
+      </div>`;
+
+    document.getElementById('me_drawer_body').innerHTML = html;
+
+    // Рендер фактов
+    renderFactsList(facts);
+
+    // Табы
+    document.querySelectorAll('.me-tab').forEach(btn =>
+      btn.addEventListener('click', function () {
+        drawerCat = this.dataset.cat;
+        document.querySelectorAll('.me-tab').forEach(b => b.classList.remove('me-active'));
+        this.classList.add('me-active');
+        renderFactsList(facts);
+      })
+    );
+
+    // Поиск
+    document.getElementById('me_drawer_search').addEventListener('input', function () {
+      drawerQuery = this.value;
+      renderFactsList(facts);
+    });
+
+    // Добавить вручную
+    document.getElementById('me_add_btn').addEventListener('click', async () => {
+      const cat  = document.getElementById('me_add_cat').value;
+      const text = document.getElementById('me_add_text').value.trim();
+      if (!text) return xtoast('warning', 'Введите текст факта');
+      const fact = { id: makeId() };
+      if (cat === 'characters') { fact.name = text; fact.type = 'new'; }
+      else if (cat === 'events') { fact.what = text; fact.type = 'new'; }
+      else { fact.fact = text; fact.type = 'new'; }
+      const current = await getFacts();
+      current[cat].unshift(fact);
+      await saveFacts(current);
+      await updateInjectedPrompt();
+      await renderWidget();
+      document.getElementById('me_add_text').value = '';
+      renderFactsList(current);
+      xtoast('success', 'Факт добавлен');
+    });
+  }
+
+  function renderFactsList(facts) {
+    const container = document.getElementById('me_facts_list');
+    if (!container) return;
+    const q = drawerQuery.toLowerCase();
+
+    const catsToShow = drawerCat === 'all' ? Object.keys(CATS) : [drawerCat];
+    let html = '', anyFact = false;
+
+    for (const catId of catsToShow) {
+      const cat   = CATS[catId];
+      const items = (facts[catId] || []).filter(f =>
+        !q || JSON.stringify(f).toLowerCase().includes(q)
+      );
+      if (!items.length) continue;
+      anyFact = true;
+
+      html += `<div class="me-cat-block">
+<div class="me-cat-head" style="border-left-color:${cat.color}">
+  ${cat.icon} ${cat.label} <span class="me-cnt">${items.length}</span>
+</div>`;
+
+      items.forEach((f, idx) => {
+        const name = f.name || f.what || f.fact || '?';
+        const rows = [];
+        if (catId === 'characters') {
+          if (f.rel_type) rows.push(`<span class="me-pill">↔</span> ${esc(f.from)} — ${esc(f.rel_type)} — ${esc(f.to)}`);
+          if (f.status)   rows.push(`<span class="me-pill">статус</span> ${esc(f.status)}`);
+          if (f.location) rows.push(`<span class="me-pill">локация</span> ${esc(f.location)}`);
+          if (f.traits?.length) rows.push(`<span class="me-pill">черты</span> ${esc(f.traits.join(', '))}`);
+        } else if (catId === 'events') {
+          if (f.where)        rows.push(`<span class="me-pill">место</span> ${esc(f.where)}`);
+          if (f.consequence)  rows.push(`<span class="me-pill">итог</span> ${esc(f.consequence)}`);
+          if (f.who?.length)  rows.push(`<span class="me-pill">кто</span> ${esc(f.who.join(', '))}`);
+        } else if (catId === 'secrets') {
+          if (f.known_by?.length)    rows.push(`<span class="me-pill">знает</span> ${esc(f.known_by.join(', '))}`);
+          if (f.hidden_from?.length) rows.push(`<span class="me-pill">скрыто от</span> ${esc(f.hidden_from.join(', '))}`);
+        }
+
+        html += `<div class="me-fact-card">
+  <div class="me-fact-inner">
+    <div class="me-fact-name">${esc(name)}</div>
+    ${rows.map(r => `<div class="me-fact-row">${r}</div>`).join('')}
+  </div>
+  <button class="me-del-btn" data-cat="${catId}" data-idx="${idx}" title="Удалить">✕</button>
+</div>`;
+      });
+
+      html += `</div>`;
     }
-    if (cat === 'events') {
-        var s = item.what;
-        if (item.where)       s += ' <small>@ ' + item.where + '</small>';
-        if (item.consequence) s += '<br><small>&rarr; ' + item.consequence + '</small>';
-        return s;
+
+    if (!anyFact) {
+      html = `<div class="me-empty">
+  <div class="me-empty-ico">${q ? '🔍' : '🧠'}</div>
+  <div>${q ? 'Ничего не найдено' : 'Факты ещё не извлечены.<br>Нажмите «Сканировать чат».'}</div>
+</div>`;
     }
-    if (cat === 'secrets') {
-        var s = item.fact;
-        if (item.hidden_from && item.hidden_from.length) s += '<br><small>hidden from: ' + item.hidden_from.join(', ') + '</small>';
-        return s;
+
+    container.innerHTML = html;
+
+    // Удаление
+    container.querySelectorAll('.me-del-btn').forEach(btn =>
+      btn.addEventListener('click', async function () {
+        const cat = this.dataset.cat;
+        const idx = parseInt(this.dataset.idx);
+        const current = await getFacts();
+        if (!current[cat]) return;
+        current[cat].splice(idx, 1);
+        await saveFacts(current);
+        await updateInjectedPrompt();
+        await renderWidget();
+        renderFactsList(current);
+      })
+    );
+  }
+
+  /* ══════════════════════════════════════════════════════
+     ПАНЕЛЬ НАСТРОЕК ST
+  ══════════════════════════════════════════════════════ */
+
+  async function mountSettingsUI() {
+    if (document.getElementById('me_settings_block')) return;
+    const target = $('#extensions_settings2').length ? '#extensions_settings2' : '#extensions_settings';
+    if (!$(target).length) { console.warn('[ME] settings container not found'); return; }
+
+    const s = getSettings();
+    $(target).append(`
+      <div class="me-settings-block" id="me_settings_block">
+        <div class="me-settings-title">
+          <span>🧠 Memory Extractor — Извлечение памяти</span>
+          <button type="button" id="me_collapse_btn">▾</button>
+        </div>
+        <div class="me-settings-body" id="me_settings_body">
+
+          <div class="me-s-section">Основное</div>
+          <div class="me-s-row">
+            <label class="checkbox_label">
+              <input type="checkbox" id="me_s_enabled" ${s.enabled ? 'checked' : ''}>
+              <span>Включить расширение</span>
+            </label>
+          </div>
+          <div class="me-s-row">
+            <label class="checkbox_label">
+              <input type="checkbox" id="me_s_widget" ${s.showWidget ? 'checked' : ''}>
+              <span>Показывать плавающий виджет 🧠</span>
+            </label>
+          </div>
+
+          <div class="me-s-section">Источник API</div>
+          <div class="me-s-row">
+            <label class="me-radio-lbl"><input type="radio" name="me_api_mode" value="st" ${s.api_mode === 'st' ? 'checked' : ''}> Текущее ST подключение</label>
+          </div>
+          <div class="me-s-row">
+            <label class="me-radio-lbl"><input type="radio" name="me_api_mode" value="custom" ${s.api_mode === 'custom' ? 'checked' : ''}> Свой API / Прокси</label>
+          </div>
+          <div id="me_s_custom_block" style="${s.api_mode !== 'custom' ? 'display:none' : ''}">
+            <div class="me-s-row">
+              <span class="me-s-lbl">Endpoint:</span>
+              <input type="text" id="me_s_api_url" class="me-s-input" placeholder="https://api.openai.com/v1" value="${esc(s.api_url || '')}">
+            </div>
+            <div class="me-s-row">
+              <span class="me-s-lbl">API-ключ:</span>
+              <input type="password" id="me_s_api_key" class="me-s-input" placeholder="sk-..." value="${esc(s.api_key || '')}">
+              <button type="button" id="me_s_key_toggle" class="menu_button" style="padding:5px 10px;flex-shrink:0">👁</button>
+            </div>
+            <div class="me-s-row">
+              <span class="me-s-lbl">Модель:</span>
+              <select id="me_s_model" class="me-s-select" style="flex:1">
+                ${s.api_model ? `<option value="${esc(s.api_model)}" selected>${esc(s.api_model)}</option>` : '<option value="">-- нажми 🔄 --</option>'}
+              </select>
+              <button type="button" id="me_s_refresh_models" class="menu_button" title="Загрузить список моделей" style="padding:5px 10px;flex-shrink:0">🔄</button>
+            </div>
+          </div>
+
+          <div class="me-s-section">Триггер сканирования</div>
+          <div class="me-s-row">
+            <label class="me-radio-lbl"><input type="radio" name="me_trigger" value="auto"   ${s.trigger_mode === 'auto'   ? 'checked' : ''}> Автоматически каждые N сообщений</label>
+          </div>
+          <div class="me-s-row">
+            <label class="me-radio-lbl"><input type="radio" name="me_trigger" value="manual" ${s.trigger_mode === 'manual' ? 'checked' : ''}> Только вручную</label>
+          </div>
+          <div class="me-s-row" id="me_s_auto_row" style="${s.trigger_mode !== 'auto' ? 'display:none' : ''}">
+            <span class="me-s-lbl">Каждые:</span>
+            <input type="number" id="me_s_trigger_every" class="me-s-num" min="1" max="200" value="${s.trigger_every}">
+            <span>сообщений</span>
+          </div>
+          <div class="me-s-row">
+            <span class="me-s-lbl">Сканировать:</span>
+            <input type="number" id="me_s_scan_last" class="me-s-num" min="5" max="200" value="${s.scan_last}">
+            <span>последних сообщений</span>
+          </div>
+
+          <div class="me-s-section">Инжект в контекст</div>
+          <div class="me-s-row">
+            <span class="me-s-lbl">Позиция:</span>
+            <select id="me_s_inject_pos" class="me-s-select" style="flex:1">
+              <option value="0" ${s.inject_position === 0 ? 'selected' : ''}>В промпт</option>
+              <option value="1" ${s.inject_position === 1 ? 'selected' : ''}>В чат</option>
+              <option value="2" ${s.inject_position === 2 ? 'selected' : ''}>Перед промптом</option>
+            </select>
+          </div>
+
+          <div class="me-s-section">Действия</div>
+          <div class="me-s-row" style="flex-wrap:wrap;gap:6px">
+            <button class="menu_button" id="me_scan_btn">🔍 Сканировать чат</button>
+            <button class="menu_button" id="me_open_drawer_btn">📋 Открыть трекер</button>
+            <button class="menu_button" id="me_s_reset_pos_btn">📍 Сбросить позицию виджета</button>
+          </div>
+          <div id="me_status_line" style="font-size:11px;margin-top:4px;min-height:16px;color:#94a3b8"></div>
+
+          <div class="me-s-section">Статистика</div>
+          <div class="me-s-hint" id="me_s_stats">${await buildStatsText()}</div>
+
+        </div>
+      </div>
+    `);
+
+    if (s.collapsed) {
+      $('#me_settings_body').hide();
+      $('#me_collapse_btn').text('▸');
     }
-    return JSON.stringify(item);
-}
 
-// ─── Utils ────────────────────────────────────────────────────
-function updateScanButton(scanning) {
-    $('#mem-scan-btn').prop('disabled', scanning).text(scanning ? 'Scanning...' : 'Scan Now');
-}
+    // Сворачивание
+    $('#me_collapse_btn').on('click', () => {
+      const now = !$('#me_settings_body').is(':visible');
+      if (now) $('#me_settings_body').show(); else $('#me_settings_body').hide();
+      $('#me_collapse_btn').text(now ? '▾' : '▸');
+      getSettings().collapsed = !now;
+      ctx().saveSettingsDebounced();
+    });
 
-function showToast(msg, isError) {
-    var $t = $('<div class="mem-toast' + (isError ? ' mem-toast-err' : '') + '">' + msg + '</div>');
-    $('body').append($t);
-    setTimeout(function() { $t.addClass('show'); }, 10);
-    setTimeout(function() { $t.removeClass('show'); setTimeout(function() { $t.remove(); }, 300); }, 3000);
-}
+    // Основные переключатели
+    $('#me_s_enabled').on('change', async function () {
+      getSettings().enabled = this.checked;
+      ctx().saveSettingsDebounced();
+      await updateInjectedPrompt();
+      await renderWidget();
+    });
 
-function countNew(incoming) {
-    var nf = incoming.new_facts || {};
-    return (nf.characters ? nf.characters.length : 0)
-         + (nf.relations  ? nf.relations.length  : 0)
-         + (nf.events     ? nf.events.length     : 0)
-         + (nf.secrets    ? nf.secrets.length    : 0);
-}
+    $('#me_s_widget').on('change', async function () {
+      getSettings().showWidget = this.checked;
+      ctx().saveSettingsDebounced();
+      await renderWidget();
+    });
 
-function uid() { return Math.random().toString(36).slice(2, 9); }
+    // API mode
+    $('input[name="me_api_mode"]').on('change', function () {
+      getSettings().api_mode = this.value;
+      ctx().saveSettingsDebounced();
+      $('#me_s_custom_block').css('display', this.value === 'custom' ? '' : 'none');
+    });
 
-function similarity(a, b) {
-    if (!a || !b) return 0;
-    var sa = new Set(a.toLowerCase().split(/\s+/));
-    var sb = new Set(b.toLowerCase().split(/\s+/));
-    var inter = 0;
-    sa.forEach(function(w) { if (sb.has(w)) inter++; });
-    var union = new Set(Array.from(sa).concat(Array.from(sb))).size;
-    return union === 0 ? 0 : inter / union;
-}
+    $('#me_s_api_url').on('input', function () { getSettings().api_url = this.value.trim(); ctx().saveSettingsDebounced(); });
+    $('#me_s_api_key').on('input', function () { getSettings().api_key = this.value.trim(); ctx().saveSettingsDebounced(); });
+    $('#me_s_key_toggle').on('click', () => {
+      const inp = document.getElementById('me_s_api_key');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+
+    $('#me_s_model').on('change', function () { getSettings().api_model = this.value; ctx().saveSettingsDebounced(); });
+
+    $('#me_s_refresh_models').on('click', async function () {
+      $(this).prop('disabled', true).text('⏳');
+      try {
+        const models = await fetchModels();
+        const cur    = getSettings().api_model || '';
+        $('#me_s_model').html('<option value="">-- выбери модель --</option>');
+        models.forEach(id => {
+          const opt = new Option(id, id, false, id === cur);
+          $('#me_s_model').append(opt);
+        });
+        xtoast('success', `Загружено моделей: ${models.length}`);
+      } catch (e) {
+        xtoast('error', 'Ошибка загрузки моделей: ' + e.message);
+      } finally {
+        $(this).prop('disabled', false).text('🔄');
+      }
+    });
+
+    // Триггер
+    $('input[name="me_trigger"]').on('change', function () {
+      getSettings().trigger_mode = this.value;
+      ctx().saveSettingsDebounced();
+      $('#me_s_auto_row').css('display', this.value === 'auto' ? '' : 'none');
+    });
+
+    $('#me_s_trigger_every').on('input', function () { getSettings().trigger_every = parseInt(this.value) || 10; ctx().saveSettingsDebounced(); });
+    $('#me_s_scan_last').on('input',     function () { getSettings().scan_last     = parseInt(this.value) || 20; ctx().saveSettingsDebounced(); });
+    $('#me_s_inject_pos').on('change',   async function () {
+      getSettings().inject_position = parseInt(this.value);
+      ctx().saveSettingsDebounced();
+      await updateInjectedPrompt();
+    });
+
+    // Кнопки действий
+    $('#me_scan_btn').on('click',         () => runExtraction());
+    $('#me_open_drawer_btn').on('click',  () => openDrawer(true));
+    $('#me_s_reset_pos_btn').on('click',  () => {
+      try { localStorage.removeItem(FAB_POS_KEY); } catch {}
+      setFabDefault();
+      xtoast('success', 'Позиция виджета сброшена');
+    });
+  }
+
+  async function buildStatsText() {
+    const facts = await getFacts();
+    const s = getSettings();
+    return `Сканирований: ${s.total_scans || 0} · Персонажей: ${(facts.characters||[]).length} · Событий: ${(facts.events||[]).length} · Секретов: ${(facts.secrets||[]).length}`;
+  }
+
+  /* ══════════════════════════════════════════════════════
+     СОБЫТИЯ ЧАТА
+  ══════════════════════════════════════════════════════ */
+
+  function wireChatEvents() {
+    const { eventSource, event_types } = ctx();
+
+    eventSource.on(event_types.APP_READY, async () => {
+      ensureFab(); applyFabPos(); ensureDrawer();
+      await mountSettingsUI();
+      await updateInjectedPrompt();
+      await renderWidget();
+    });
+
+    eventSource.on(event_types.CHAT_CHANGED, async () => {
+      msgCounter = 0;
+      await updateInjectedPrompt();
+      await renderWidget();
+    });
+
+    eventSource.on(event_types.MESSAGE_RECEIVED, async () => {
+      const s = getSettings();
+      if (!s.enabled || s.trigger_mode !== 'auto') return;
+      msgCounter++;
+      if (msgCounter >= s.trigger_every) {
+        msgCounter = 0;
+        await runExtraction();
+      }
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════
+     ЗАПУСК
+  ══════════════════════════════════════════════════════ */
+
+  jQuery(() => {
+    try { wireChatEvents(); console.log('[ME] Memory Extractor загружен ✓'); }
+    catch (e) { console.error('[ME] Ошибка инициализации:', e); }
+  });
+
+})();
