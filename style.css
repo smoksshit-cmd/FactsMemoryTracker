@@ -536,8 +536,8 @@
 /* ─── Settings panel ─────────────────────────────────────────────── */
 
 .fmt-settings-block {
-  margin: 12px 0;
-  border-radius: 10px;
+  margin: 8px 0;
+  border-radius: 8px;
   border: 1px solid rgba(100,160,255,0.14);
   background: rgba(20,30,50,0.55);
   overflow: hidden;
@@ -547,12 +547,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
-  font-size: 14px;
+  padding: 8px 12px;
+  font-size: 13px;
   font-weight: 700;
   color: #90b8f8;
   background: linear-gradient(135deg, #1f3052, #162240);
   letter-spacing: 0.02em;
+  cursor: default;
 }
 
 .fmt-settings-title button {
@@ -560,7 +561,7 @@
   border: none;
   color: rgba(150,185,248,0.65);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   padding: 2px 6px;
   border-radius: 4px;
   transition: background 0.15s;
@@ -568,78 +569,123 @@
 
 .fmt-settings-title button:hover { background: rgba(100,160,255,0.14); }
 
-.fmt-settings-body { padding: 12px 14px; }
+.fmt-settings-body { padding: 4px 0 6px; }
 
+/* Accordion section */
+.fmt-sec {
+  border-bottom: 1px solid rgba(100,160,255,0.07);
+}
+
+.fmt-sec:last-child { border-bottom: none; }
+
+.fmt-sec-hdr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(160,190,255,0.75);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s;
+}
+
+.fmt-sec-hdr:hover { background: rgba(100,160,255,0.07); }
+
+.fmt-sec-chev {
+  font-size: 9px;
+  opacity: 0.5;
+  width: 10px;
+  flex-shrink: 0;
+}
+
+.fmt-sec-body {
+  padding: 6px 12px 10px;
+  border-top: 1px solid rgba(100,160,255,0.06);
+}
+
+/* Compact 2-column checkbox row */
+.fmt-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  margin-bottom: 7px;
+}
+
+/* Compact checkbox label */
+.fmt-ck {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  color: rgba(200,220,255,0.8);
+  white-space: nowrap;
+}
+
+.fmt-ck input[type="checkbox"] { margin: 0; flex-shrink: 0; }
+
+/* General rows */
 .fmt-srow {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   flex-wrap: wrap;
 }
 
-.fmt-srow label { color: rgba(200,220,255,0.8); font-size: 13px; white-space: nowrap; }
-.fmt-srow select { flex: 1; padding: 5px 8px; border-radius: 8px; border: 1px solid rgba(100,160,255,0.2); background: rgba(10,18,32,0.8); color: #d8e8ff; font-size: 12px; cursor: pointer; }
+.fmt-srow label { color: rgba(200,220,255,0.75); font-size: 11px; white-space: nowrap; }
+.fmt-srow select {
+  flex: 1;
+  padding: 4px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(100,160,255,0.2);
+  background: rgba(10,18,32,0.8);
+  color: #d8e8ff;
+  font-size: 12px;
+  cursor: pointer;
+}
 .fmt-srow select:focus { outline: none; border-color: rgba(100,160,255,0.5); }
 
-.fmt-slider-row input[type="range"] { flex: 1; min-width: 80px; accent-color: #5090e0; }
-.fmt-slider-row span { font-weight: 700; color: #90b8f8; min-width: 28px; text-align: right; font-size: 12px; }
+.fmt-slider-row input[type="range"] { flex: 1; min-width: 60px; accent-color: #5090e0; }
+.fmt-slider-row span { font-weight: 700; color: #90b8f8; min-width: 26px; text-align: right; font-size: 11px; }
 
-.fmt-api-section {
-  margin-top: 12px;
-  padding: 11px 12px;
-  border-radius: 8px;
-  background: rgba(10,18,32,0.5);
-  border: 1px solid rgba(100,160,255,0.1);
+/* Compact action buttons */
+.fmt-compact-btns {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 6px;
 }
 
-.fmt-api-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: rgba(150,185,248,0.9);
-  margin-bottom: 5px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.fmt-compact-btns .menu_button {
+  flex: 1 1 auto;
+  font-size: 11px !important;
+  padding: 5px 8px !important;
+  min-width: 0;
 }
 
-.fmt-api-hint {
-  font-size: 11px;
-  color: rgba(180,200,240,0.48);
-  margin-bottom: 8px;
-  line-height: 1.5;
-}
-
-.fmt-api-hint code { background: rgba(100,160,255,0.12); padding: 1px 4px; border-radius: 3px; color: #a8d0ff; }
-.fmt-hint code { background: rgba(100,160,255,0.12); padding: 1px 4px; border-radius: 3px; color: #a8d0ff; }
-
-.fmt-api-label {
-  display: block;
-  font-size: 10px;
-  color: rgba(180,200,240,0.5);
-  margin-bottom: 3px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 600;
-}
-
+/* API fields */
 .fmt-api-field {
   width: 100%;
-  padding: 6px 10px;
-  border-radius: 8px;
+  padding: 5px 9px;
+  border-radius: 7px;
   border: 1px solid rgba(100,160,255,0.18);
   background: rgba(5,12,25,0.85);
   color: #d8e8ff;
   font-size: 12px;
   box-sizing: border-box;
-  margin-bottom: 8px;
   transition: border-color 0.15s;
 }
 
 .fmt-api-field:focus { outline: none; border-color: rgba(100,160,255,0.5); }
 
 .fmt-api-select {
-  padding: 6px 8px;
-  border-radius: 8px;
+  padding: 5px 7px;
+  border-radius: 7px;
   border: 1px solid rgba(100,160,255,0.18);
   background: rgba(5,12,25,0.85);
   color: #d8e8ff;
@@ -653,31 +699,15 @@
   background: rgba(5,12,25,0.85);
   color: #c8deff;
   border: 1px solid rgba(100,160,255,0.18);
-  border-radius: 8px;
-  padding: 8px;
+  border-radius: 7px;
+  padding: 7px;
   font-size: 11px;
   font-family: Consolas, monospace;
   resize: vertical;
-  margin-top: 6px;
 }
 
 #fmt_prompt_tpl:focus { outline: none; border-color: rgba(100,160,255,0.5); }
 
-.fmt-btn-row { gap: 6px; margin-top: 10px; }
-.fmt-btn-row button.menu_button { font-size: 12px !important; padding: 6px 10px !important; }
-
-.fmt-hint {
-  margin-top: 10px;
-  padding: 9px 12px;
-  background: rgba(100,160,255,0.05);
-  border-radius: 8px;
-  border-left: 3px solid rgba(100,160,255,0.28);
-  font-size: 11px;
-  color: rgba(180,200,240,0.6);
-  line-height: 1.75;
-}
-
-.fmt-hint b { color: rgba(180,200,240,0.9); }
 
 /* ─── Flashback button (per-row) ────────────────────────────────── */
 
