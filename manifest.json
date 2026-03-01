@@ -1,12 +1,15 @@
 {
-  "display_name": "🧠 Facts Memory Tracker",
-  "loading_order": 90,
-  "requires": [],
-  "optional": [],
-  "js": "index.js",
-  "css": "style.css",
-  "author": "custom",
-  "version": "1.0.0",
-  "homePage": "",
-  "auto_update": false
+  "display_name": "Трекер памяти фактов",
+  "loading_order": 56,
+  "js": [
+    "index.js"
+  ],
+  "css": [
+    "style.css"
+  ],
+  "author": "Smokshi",
+  "version": "1.3.0",
+  "auto_update": true,
+  "homepage": "https://github.com/smoksshit-cmd/SillyTavern-FactsMemoryTracker",
+  "requires": []
 }
