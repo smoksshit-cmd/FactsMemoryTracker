@@ -1,16 +1,12 @@
 /**
  * Facts Memory Tracker (FMT) — SillyTavern Extension
- * v1.2.0
+ * v1.3.0
  *
- * Новое в v1.2:
- *  - Inline-редактирование текста, категории, важности
- *  - Лимит токенов в инъекции + кастомный шаблон промпта
- *  - Авто-маркер [FACT: текст | категория] в ответах модели
- *  - Экспорт / Импорт JSON + кнопка «Скопировать»
- *  - Поиск по тексту факта
- *  - Сортировка (дата / важность / категория)
- *  - Счётчик токенов инжектируемого блока
- *  - История сканирований
+ * Новое в v1.3:
+ *  - Категория «Флешбэки» 🌀 — воспоминания персонажа из прошлого
+ *  - Авто-маркер [FLASHBACK: текст] в ответах модели
+ *  - AI-экстракция флешбэков при сканировании
+ *  - Особый стиль строк-флешбэков в UI
  */
 
 (() => {
@@ -23,12 +19,15 @@
   const FAB_POS_KEY = 'fmt_fab_pos_v1';
   const FAB_MARGIN  = 8;
 
-  const FACT_MARKER_RE = /\[FACT:\s*([^\]|]+?)(?:\|\s*(characters|events|secrets))?\s*\]/gi;
+  const FACT_MARKER_RE      = /\[FACT:\s*([^\]|]+?)(?:\|\s*(characters|events|secrets|flashbacks))?\s*\]/gi;
+  const FLASHBACK_MARKER_RE = /\[FLASHBACK:\s*([^\]]+?)\s*\]/gi;
+  const FLASHBACK_TAG       = 'FMT_FLASHBACK_TRIGGER';
 
   const CATEGORIES = Object.freeze({
     characters: { label: 'Персонажи & Отношения', icon: '👤', short: 'ПЕРСОНАЖИ' },
     events:     { label: 'События & Последствия',  icon: '📅', short: 'СОБЫТИЯ'   },
     secrets:    { label: 'Секреты & Скрытое',       icon: '🔒', short: 'СЕКРЕТЫ'   },
+    flashbacks: { label: 'Флешбэки & Прошлое',      icon: '🌀', short: 'ФЛЕШБЭКИ'  },
   });
 
   const IMPORTANCE = Object.freeze({
@@ -66,6 +65,10 @@
     fabScale:         0.8,
     autoMarker:       true,
     sortMode:         'date',
+    // Флешбек-триггер
+    flashEnabled:     true,
+    flashChance:      0,          // 0 = только вручную, 1–30 = % шанс на каждое сообщение
+    flashCats:        ['flashbacks', 'secrets', 'characters'], // категории для выборки
   });
 
   // Runtime
@@ -75,6 +78,7 @@
   const collapsedCats  = {};
   let searchQuery      = '';
   let currentSortMode  = 'date';
+  let flashbackPending = false; // ждём следующего MESSAGE_RECEIVED чтобы очистить тег
 
   // ─── ST context ───────────────────────────────────────────────────────────────
 
@@ -229,11 +233,16 @@
 ЧТО ЯВЛЯЕТСЯ ФАКТОМ: имена/роли/черты персонажей, отношения, события с последствиями, скрытые мотивы, секреты, компромат, решения.
 ЧТО НЕ ЯВЛЯЕТСЯ: атмосфера без сюжетного значения, действия без последствий, общие эмоции.
 
-КАТЕГОРИИ: characters (персонажи, отношения, прошлое) | events (события, решения, последствия) | secrets (тайны, мотивы, компромат)
-ВАЖНОСТЬ: high (ключевой факт) | medium (полезный контекст) | low (второстепенный)
+КАТЕГОРИИ:
+- characters — персонажи, отношения, внешность, черты характера, прошлое
+- events     — произошедшие события, решения, последствия
+- secrets    — тайны, скрытые мотивы, компромат
+- flashbacks — воспоминания персонажа из прошлого: когда {{char}} вспоминает что-то, видит образы, упоминает давние события или травмы. Это ОТДЕЛЬНАЯ категория — не путай с events.
+
+ВАЖНОСТЬ: high (ключевой) | medium (полезный контекст) | low (второстепенный)
 Текст факта: до 15 слов, третье лицо.
 Верни ТОЛЬКО валидный JSON-массив без преамбулы и markdown:
-[{"category":"characters|events|secrets","text":"факт","importance":"high|medium|low"}]
+[{"category":"characters|events|secrets|flashbacks","text":"факт","importance":"high|medium|low"}]
 Если нет новых фактов — верни [].${existing}`;
   }
 
@@ -302,7 +311,40 @@
     }
   }
 
-  // ─── Scan ─────────────────────────────────────────────────────────────────────
+  // ─── Flashback marker parser ──────────────────────────────────────────────────
+
+  async function detectFlashbackMarkers(messageText) {
+    const s = getSettings();
+    if (!s.autoMarker || !messageText) return;
+    const matches = [...messageText.matchAll(FLASHBACK_MARKER_RE)];
+    if (!matches.length) return;
+
+    const state = await getChatState();
+    const pool  = state.facts.map(f => f.text);
+    const SIM   = 0.40;
+    let changed = false;
+
+    for (const m of matches) {
+      const text = m[1].trim();
+      if (!text || pool.some(ex => similarity(ex, text) >= SIM)) continue;
+      state.facts.unshift({
+        id: makeId(), category: 'flashbacks', text,
+        importance: 'medium', msgIdx: 0, ts: Date.now(),
+      });
+      pool.push(text);
+      changed = true;
+      toastr.info(`🌀 Флешбэк: «${text}»`, 'FMT Флешбэк', { timeOut: 5000 });
+    }
+
+    if (changed) {
+      await ctx().saveMetadata();
+      await updateInjectedPrompt();
+      await renderWidget();
+      if ($('#fmt_drawer').hasClass('fmt-open')) await renderDrawer();
+    }
+  }
+
+
 
   async function runScan(mode = 'manual') {
     if (scanInProgress) { toastr.warning('[FMT] Сканирование уже идёт…'); return; }
@@ -587,6 +629,7 @@
 
         <div class="footer">
           <button type="button" id="fmt_scan_btn">🔍 Сканировать</button>
+          <button type="button" id="fmt_flashback_btn" title="Случайный флешбек из фактов">⚡ Флешбек</button>
           <button type="button" id="fmt_export_btn">📤 Экспорт</button>
           <button type="button" id="fmt_import_btn">📥 Импорт</button>
           <button type="button" id="fmt_show_prompt_btn">Промпт</button>
@@ -607,6 +650,7 @@
     $(document)
       .off('click.fmt_actions')
       .on('click.fmt_actions', '#fmt_scan_btn',        () => runScan('manual'))
+      .on('click.fmt_actions', '#fmt_flashback_btn',   () => triggerFlashback())
       .on('click.fmt_actions', '#fmt_show_prompt_btn', () => showPromptPreview())
       .on('click.fmt_actions', '#fmt_clear_btn',       () => clearAllFacts())
       .on('click.fmt_actions', '#fmt_export_btn',      () => exportJson())
@@ -728,6 +772,7 @@
         <span class="fmt-fact-text" data-id="${fact.id}" title="Кликни для редактирования">${escHtml(fact.text)}</span>
         <span class="fmt-fact-date">${ts}</span>
         <select class="fmt-inline-imp" data-id="${fact.id}" title="Изменить важность">${impOpts}</select>
+        <button class="fmt-flash-btn" data-id="${fact.id}" title="Использовать этот факт как флешбек">⚡</button>
         <button class="fmt-toggle-btn" data-id="${fact.id}" title="${dis ? 'Включить' : 'Отключить'}">${dis ? '▶' : '⏸'}</button>
         <button class="fmt-delete-btn" data-id="${fact.id}" title="Удалить">✕</button>
       </div>`;
@@ -840,6 +885,12 @@
     });
     $(document).off('change.fmt_inlineimp').on('change.fmt_inlineimp', '.fmt-inline-imp', async function () {
       await updateFactField(this.getAttribute('data-id'), 'importance', this.value);
+    });
+
+    // Per-row flashback trigger
+    $(document).off('click.fmt_flash_row').on('click.fmt_flash_row', '.fmt-flash-btn', async function (e) {
+      e.stopPropagation();
+      await triggerFlashback(this.getAttribute('data-id'));
     });
 
     // Toggle
@@ -1070,6 +1121,32 @@
           </div>
 
           <div class="fmt-api-section">
+            <div class="fmt-api-title">⚡ Флешбек-триггер</div>
+            <div class="fmt-api-hint">Заставляет {{char}} вспомнить случайный факт в следующем ответе. Нажми кнопку в трекере или включи авто-шанс.</div>
+            <div class="fmt-srow">
+              <label class="checkbox_label">
+                <input type="checkbox" id="fmt_flash_enabled" ${(s.flashEnabled !== false) ? 'checked' : ''}>
+                <span>Включить флешбек-триггер</span>
+              </label>
+            </div>
+            <div class="fmt-srow fmt-slider-row">
+              <label>Авто-шанс на сообщение:</label>
+              <input type="range" id="fmt_flash_chance" min="0" max="30" step="1" value="${s.flashChance || 0}">
+              <span id="fmt_flash_chance_val">${s.flashChance || 0}%</span>
+            </div>
+            <div class="fmt-srow" style="flex-direction:column;align-items:flex-start;gap:4px">
+              <label style="margin-bottom:2px">Категории для флешбека:</label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                ${Object.entries(CATEGORIES).map(([k,v]) => `
+                  <label class="checkbox_label" style="font-size:12px">
+                    <input type="checkbox" class="fmt-flash-cat-cb" value="${k}" ${(s.flashCats||['flashbacks','secrets','characters']).includes(k) ? 'checked' : ''}>
+                    <span>${v.icon} ${v.label}</span>
+                  </label>`).join('')}
+              </div>
+            </div>
+          </div>
+
+          <div class="fmt-api-section">
             <div class="fmt-api-title">📝 Шаблон промпта</div>
             <div class="fmt-api-hint">Используй <code>{{facts}}</code> как плейсхолдер для строк фактов.</div>
             <textarea id="fmt_prompt_tpl" rows="4">${escHtml(s.promptTemplate || DEFAULT_PROMPT_TEMPLATE)}</textarea>
@@ -1148,6 +1225,21 @@
     // Select
     $('#fmt_inject_imp').on('change', async ev => { s.injectImportance = $(ev.currentTarget).val(); ctx().saveSettingsDebounced(); await updateInjectedPrompt(); });
 
+    // Flashback settings
+    $('#fmt_flash_enabled').on('input', ev => { s.flashEnabled = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); });
+    $('#fmt_flash_chance').on('input', ev => {
+      const v = +$(ev.currentTarget).val();
+      s.flashChance = v;
+      $('#fmt_flash_chance_val').text(v + '%');
+      ctx().saveSettingsDebounced();
+    });
+    $(document).on('change.fmt_flash_cats', '.fmt-flash-cat-cb', () => {
+      const cats = [];
+      document.querySelectorAll('.fmt-flash-cat-cb:checked').forEach(el => cats.push(el.value));
+      s.flashCats = cats;
+      ctx().saveSettingsDebounced();
+    });
+
     // Template
     $('#fmt_prompt_tpl').on('input', () => { s.promptTemplate = $('#fmt_prompt_tpl').val(); ctx().saveSettingsDebounced(); });
     $('#fmt_reset_tpl_btn').on('click', async () => {
@@ -1190,7 +1282,70 @@
       });
   }
 
-  // ─── Event wiring ─────────────────────────────────────────────────────────────
+  // ─── Flashback trigger ────────────────────────────────────────────────────────
+
+  async function triggerFlashback(factId = null) {
+    const s     = getSettings();
+    const state = await getChatState();
+    const { setExtensionPrompt } = ctx();
+
+    // Пул фактов для выборки — активные, из разрешённых категорий
+    const allowed = s.flashCats || ['flashbacks', 'secrets', 'characters'];
+    const pool    = state.facts.filter(f =>
+      !f.disabled && allowed.includes(f.category)
+    );
+
+    if (!pool.length) {
+      toastr.warning('[FMT] Нет подходящих фактов для флешбека. Добавь факты категорий: воспоминания, секреты или персонажи.');
+      return;
+    }
+
+    // Конкретный факт или случайный
+    const fact = factId
+      ? pool.find(f => f.id === factId) ?? pool[Math.floor(Math.random() * pool.length)]
+      : pool[Math.floor(Math.random() * pool.length)];
+
+    const catMeta = CATEGORIES[fact.category] || CATEGORIES.events;
+
+    // Одноразовый промпт — объясняем модели что делать в ЭТОМ ответе
+    const block = `[ФЛЕШБЕК — ТОЛЬКО ДЛЯ ЭТОГО ОТВЕТА]
+В этом ответе {{char}} внезапно — посреди сцены или разговора — переживает краткое непроизвольное воспоминание или внутренний образ, связанный со следующим фактом:
+
+${catMeta.icon} «${fact.text}»
+
+Инструкция:
+- Воспоминание должно прорваться естественно, как вспышка — образ, запах, звук, обрывок фразы
+- Не объясняй это игроку напрямую — покажи через поведение, паузу, изменение тона {{char}}
+- Флешбек короткий (1–3 предложения), не должен занимать весь ответ
+- После него {{char}} возвращается к текущей сцене
+[/ФЛЕШБЕК]`;
+
+    setExtensionPrompt(FLASHBACK_TAG, block, EXT_PROMPT_TYPES.IN_PROMPT, 0, true);
+    flashbackPending = true;
+
+    toastr.info(
+      `⚡ Флешбек подготовлен: «${fact.text.slice(0, 60)}${fact.text.length > 60 ? '…' : ''}»`,
+      'FMT Флешбек',
+      { timeOut: 5000 }
+    );
+
+    // Подсветить строку факта в дровере если открыт
+    const row = document.querySelector(`.fmt-fact-row[data-id="${fact.id}"]`);
+    if (row) {
+      row.classList.add('fmt-flash-highlight');
+      setTimeout(() => row.classList.remove('fmt-flash-highlight'), 3000);
+    }
+  }
+
+  function clearFlashbackPrompt() {
+    if (!flashbackPending) return;
+    flashbackPending = false;
+    try {
+      ctx().setExtensionPrompt(FLASHBACK_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true);
+    } catch {}
+  }
+
+
 
   function wireChatEvents() {
     const { eventSource, event_types } = ctx();
@@ -1210,6 +1365,9 @@
     });
 
     eventSource.on(event_types.MESSAGE_RECEIVED, async (idx) => {
+      // Очищаем одноразовый флешбек-промпт сразу после ответа модели
+      clearFlashbackPrompt();
+
       const { chat } = ctx();
       const msg = chat?.[idx];
       if (msg && !msg.is_user) await detectFactMarkers(msg.mes || '');
@@ -1220,7 +1378,13 @@
       if (msgSinceLastScan >= s.autoScanEvery) { msgSinceLastScan = 0; await runScan('auto'); }
     });
 
-    eventSource.on(event_types.MESSAGE_SENT, async () => { await renderWidget(); });
+    eventSource.on(event_types.MESSAGE_SENT, async () => {
+      await renderWidget();
+      // Авто-шанс флешбека: срабатывает при отправке сообщения юзером
+      const s = getSettings();
+      if (!s.flashEnabled || !s.flashChance || flashbackPending) return;
+      if (Math.random() * 100 < s.flashChance) await triggerFlashback();
+    });
   }
 
   // ─── Boot ─────────────────────────────────────────────────────────────────────
