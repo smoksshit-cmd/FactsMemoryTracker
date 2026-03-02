@@ -1,12 +1,13 @@
 /**
  * Facts Memory Tracker (FMT) — SillyTavern Extension
- * v1.3.0
+ * v1.3.1
  *
- * Новое в v1.3:
- *  - Категория «Флешбэки» 🌀 — воспоминания персонажа из прошлого
- *  - Авто-маркер [FLASHBACK: текст] в ответах модели
- *  - AI-экстракция флешбэков при сканировании
- *  - Особый стиль строк-флешбэков в UI
+ * Fixes in v1.3.1:
+ *  - БАГ 1: _workingApiConfig после «Тест соединения» не имел builder → cfg.builder is not a function
+ *  - БАГ 2: detectFlashbackMarkers вызывал getChatState() без true → факты не сохранялись
+ *  - БАГ 3: Фильтр-кнопка для категории flashbacks отсутствовала в drawer
+ *  - БАГ 4: sortFacts не знал о flashbacks → перемешивалась с characters
+ *  - Косметика: версия в console.log исправлена на v1.3.1
  */
 
 (() => {
@@ -65,11 +66,10 @@
     fabScale:         0.8,
     autoMarker:       true,
     sortMode:         'date',
-    fallbackEnabled:  true,   // откат на ST generateRaw если кастовый API не ответил
-    // Флешбек-триггер
+    fallbackEnabled:  true,
     flashEnabled:     true,
-    flashChance:      0,          // 0 = только вручную, 1–30 = % шанс на каждое сообщение
-    flashCats:        ['flashbacks', 'secrets', 'characters'], // категории для выборки
+    flashChance:      0,
+    flashCats:        ['flashbacks', 'secrets', 'characters'],
   });
 
   // Runtime
@@ -80,9 +80,6 @@
   let searchQuery      = '';
   let currentSortMode  = 'date';
 
-  // Flashback queue & history
-  // queue: [{id, factId, factText, factCat, ts}] — pending, fire one per bot response
-  // history: [{id, factText, factCat, ts, fired}] — last 10 that actually fired
   const flashQueue   = [];
   const flashHistory = [];
   const MAX_FLASH_HISTORY = 10;
@@ -105,16 +102,12 @@
 
   function chatKey() {
     const c = ctx();
-    // chatId может меняться при ребрейнче/авто-сохранении — берём всё что есть
     const chatId = (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() : null)
-      || c.chatId
-      || c.chat_id
-      || 'unknown';
+      || c.chatId || c.chat_id || 'unknown';
     const charId = c.characterId ?? c.groupId ?? 'unknown';
     return `fmt_v1__${charId}__${chatId}`;
   }
 
-  // Ищем данные по точному ключу, потом по похожим (тот же charId, другой chatId)
   function findExistingStateKey(chatMetadata) {
     const exact = chatKey();
     if (chatMetadata[exact]?.facts?.length) return exact;
@@ -123,45 +116,36 @@
     const charId = String(c.characterId ?? c.groupId ?? 'unknown');
     const prefix = `fmt_v1__${charId}__`;
 
-    // Ищем ключ с тем же персонажем у которого есть факты
     let bestKey  = null;
     let bestTime = 0;
     for (const k of Object.keys(chatMetadata)) {
       if (!k.startsWith(prefix)) continue;
       const state = chatMetadata[k];
       if (!Array.isArray(state?.facts) || !state.facts.length) continue;
-      // Берём самый свежий (у последнего факта максимальный ts)
       const lastTs = state.facts.reduce((mx, f) => Math.max(mx, f.ts || 0), 0);
       if (lastTs > bestTime) { bestTime = lastTs; bestKey = k; }
     }
-    return bestKey; // null если ничего нет
+    return bestKey;
   }
 
-  // Создать пустой стейт без немедленного сохранения
   function emptyState() {
     return { facts: [], lastScannedMsgIndex: 0, scanLog: [] };
   }
 
-  // Основной метод — никогда не создаёт пустой стейт при простом чтении
   async function getChatState(createIfMissing = false) {
     const { chatMetadata, saveMetadata } = ctx();
 
-    // Сначала пробуем точный ключ
     const exact = chatKey();
     if (chatMetadata[exact]) {
       if (!chatMetadata[exact].scanLog) chatMetadata[exact].scanLog = [];
       return chatMetadata[exact];
     }
 
-    // Ищем данные под похожим ключом (тот же персонаж, другой chatId)
     const recovered = findExistingStateKey(chatMetadata);
     if (recovered) {
-      // Мигрируем под актуальный ключ
       chatMetadata[exact] = chatMetadata[recovered];
-      // Старый ключ оставляем как резервную копию (не удаляем)
       if (!chatMetadata[exact].scanLog) chatMetadata[exact].scanLog = [];
       console.info(`[FMT] Факты восстановлены с ключа ${recovered} → ${exact}`);
-      // Сообщаем пользователю что данные были восстановлены
       setTimeout(() => toastr.success(
         `🧠 FMT: факты восстановлены (${chatMetadata[exact].facts.length} шт.)`,
         'Восстановление данных',
@@ -171,19 +155,16 @@
       return chatMetadata[exact];
     }
 
-    // Данных нет совсем — создаём только если явно запрошено (скан, добавление)
     if (createIfMissing) {
       chatMetadata[exact] = emptyState();
       await saveMetadata();
     } else {
-      // Для чтения (виджет, рендер) возвращаем временный пустой объект — не сохраняем
       return emptyState();
     }
 
     if (!chatMetadata[exact].scanLog) chatMetadata[exact].scanLog = [];
     return chatMetadata[exact];
   }
-
 
   // ─── Utils ────────────────────────────────────────────────────────────────────
 
@@ -260,15 +241,12 @@
       .replace(/\/v1$/, '');
   }
 
-  // Пробуем разные эндпоинты для получения списка моделей
   async function fetchModels() {
     const base   = getBaseUrl();
     const apiKey = (getSettings().apiKey || '').trim();
     if (!base) throw new Error('Укажи Endpoint');
 
     const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-
-    // Некоторые прокси не поддерживают /v1/models — пробуем несколько путей
     const candidates = [
       `${base}/v1/models`,
       `${base}/models`,
@@ -280,7 +258,6 @@
         const resp = await fetch(url, { headers });
         if (!resp.ok) continue;
         const data = await resp.json();
-        // Разные форматы ответа
         const list = data.data || data.models || data.model_ids || data.available_models || [];
         const ids  = list.map(m => {
           if (typeof m === 'string') return m;
@@ -293,7 +270,8 @@
     throw new Error('Список моделей недоступен. Введи модель вручную.');
   }
 
-  // Тест соединения — короткий запрос чтобы проверить работоспособность
+  // ─── БАГ 1 ИСПРАВЛЕН: testApiConnection теперь возвращает {url, builder} а не {url, body}
+  // Это позволяет сохранить рабочий конфиг с функцией builder, а не статичным body
   async function testApiConnection() {
     const s    = getSettings();
     const base = getBaseUrl();
@@ -305,14 +283,11 @@
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     };
 
-    // Минимальный запрос — разные форматы для совместимости
-    const bodies = [
-      // OpenAI-совместимый с system
-      { model: s.apiModel || 'gpt-4o-mini', max_tokens: 5, temperature: 0,
-        messages: [{ role: 'system', content: 'test' }, { role: 'user', content: 'hi' }] },
-      // Без system (некоторые прокси не поддерживают)
-      { model: s.apiModel || 'gpt-4o-mini', max_tokens: 5, temperature: 0,
-        messages: [{ role: 'user', content: 'hi' }] },
+    const bodyBuilders = [
+      (m) => ({ model: m, max_tokens: 5, temperature: 0,
+        messages: [{ role: 'system', content: 'test' }, { role: 'user', content: 'hi' }] }),
+      (m) => ({ model: m, max_tokens: 5, temperature: 0,
+        messages: [{ role: 'user', content: 'hi' }] }),
     ];
 
     const endpoints = [
@@ -322,16 +297,20 @@
     ];
 
     for (const url of endpoints) {
-      for (const body of bodies) {
+      for (const builder of bodyBuilders) {
         try {
-          const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+          const resp = await fetch(url, {
+            method: 'POST', headers,
+            body: JSON.stringify(builder(s.apiModel || 'gpt-4o-mini')),
+          });
           if (resp.ok) {
             const data = await resp.json();
             const text = data.choices?.[0]?.message?.content
               ?? data.choices?.[0]?.text
               ?? data.response
               ?? data.content;
-            if (text !== undefined) return { url, body };
+            // Возвращаем url + builder (функцию), а не body (объект)
+            if (text !== undefined) return { url, builder };
           }
         } catch {}
       }
@@ -339,7 +318,6 @@
     throw new Error('Ни один из эндпоинтов не ответил корректно');
   }
 
-  // Сохраняем рабочий формат чтобы не перебирать каждый раз
   let _workingApiConfig = null;
 
   async function aiGenerate(userPrompt, systemPrompt) {
@@ -347,24 +325,20 @@
     const base = getBaseUrl();
     const apiKey = (s.apiKey || '').trim();
 
-    // Если кастомный API настроен — пробуем его
     if (base) {
       const headers = {
         'Content-Type': 'application/json',
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       };
 
-      // Если уже знаем рабочий формат — используем сразу
       if (_workingApiConfig?.base === base) {
         try {
           const result = await callApiWithConfig(_workingApiConfig, userPrompt, systemPrompt, headers);
           if (result !== null) return result;
         } catch {}
-        // Рабочий конфиг перестал работать — сбрасываем
         _workingApiConfig = null;
       }
 
-      // Перебираем варианты эндпоинт × формат
       const endpoints = [
         `${base}/v1/chat/completions`,
         `${base}/chat/completions`,
@@ -372,15 +346,11 @@
         `${base}/completions`,
       ];
 
-      // Форматы тела запроса — от самого совместимого к специфичным
       const bodyBuilders = [
-        // Стандарт OpenAI с system
         (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
           messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] }),
-        // Без system — system объединяем с user
         (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
           messages: [{ role: 'user', content: `${systemPrompt}\n\n---\n\n${userPrompt}` }] }),
-        // Некоторые прокси используют 'prompt' вместо messages
         (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
           prompt: `${systemPrompt}\n\n${userPrompt}` }),
       ];
@@ -397,7 +367,6 @@
             const data = await resp.json();
             const text = extractTextFromResponse(data);
             if (text !== null) {
-              // Запоминаем рабочий формат
               _workingApiConfig = { base, url, builder };
               return text;
             }
@@ -405,7 +374,6 @@
         }
       }
 
-      // Кастомный API не сработал — логируем и падаем на fallback
       console.warn('[FMT] Кастомный API не ответил — откат на ST generateRaw');
       if (s.fallbackEnabled !== false) {
         toastr.warning('[FMT] Кастовый API не отвечает — используется встроенный ST', '', { timeOut: 4000 });
@@ -414,12 +382,11 @@
       }
     }
 
-    // Fallback: встроенный ST generateRaw
     const c = ctx();
     if (typeof c.generateRaw === 'function')
       return await c.generateRaw(userPrompt, null, false, false, systemPrompt, true);
 
-    throw new Error('Нет доступного API для генерации. Настрой кастовый API или используй ST с подключённой моделью.');
+    throw new Error('Нет доступного API для генерации.');
   }
 
   async function callApiWithConfig(cfg, userPrompt, systemPrompt, headers) {
@@ -434,13 +401,10 @@
   }
 
   function extractTextFromResponse(data) {
-    // OpenAI chat completions
     if (data.choices?.[0]?.message?.content !== undefined)
       return data.choices[0].message.content;
-    // OpenAI completions (legacy)
     if (data.choices?.[0]?.text !== undefined)
       return data.choices[0].text;
-    // Некоторые кастомные прокси
     if (typeof data.response === 'string') return data.response;
     if (typeof data.content  === 'string') return data.content;
     if (typeof data.text     === 'string') return data.text;
@@ -537,15 +501,15 @@
     }
   }
 
-  // ─── Flashback marker parser ──────────────────────────────────────────────────
-
+  // ─── БАГ 2 ИСПРАВЛЕН: getChatState(true) вместо getChatState()
+  // Без true возвращался временный пустой объект — факты не попадали в chatMetadata
   async function detectFlashbackMarkers(messageText) {
     const s = getSettings();
     if (!s.autoMarker || !messageText) return;
     const matches = [...messageText.matchAll(FLASHBACK_MARKER_RE)];
     if (!matches.length) return;
 
-    const state = await getChatState();
+    const state = await getChatState(true); // ИСПРАВЛЕНО: true обязателен для сохранения
     const pool  = state.facts.map(f => f.text);
     const SIM   = 0.40;
     let changed = false;
@@ -569,8 +533,6 @@
       if ($('#fmt_drawer').hasClass('fmt-open')) await renderDrawer();
     }
   }
-
-
 
   async function runScan(mode = 'manual') {
     if (scanInProgress) { toastr.warning('[FMT] Сканирование уже идёт…'); return; }
@@ -845,6 +807,7 @@
           <button class="fmt-filter-btn" data-cat="characters">👤</button>
           <button class="fmt-filter-btn" data-cat="events">📅</button>
           <button class="fmt-filter-btn" data-cat="secrets">🔒</button>
+          <button class="fmt-filter-btn" data-cat="flashbacks">🌀</button>
           <span class="fmt-filter-sep">|</span>
           <button class="fmt-filter-btn" data-imp="high">🔴</button>
           <button class="fmt-filter-btn" data-imp="medium">🟡</button>
@@ -880,13 +843,12 @@
       .on('click.fmt_actions', '#fmt_scan_btn',        () => runScan('manual'))
       .on('click.fmt_actions', '#fmt_flashback_btn',   () => triggerFlashback())
       .on('click.fmt_actions', '#fmt_show_prompt_btn', () => showPromptPreview())
-      .on('click.fmt_actions', '#fmt_recover_btn',    () => recoverFacts())
+      .on('click.fmt_actions', '#fmt_recover_btn',     () => recoverFacts())
       .on('click.fmt_actions', '#fmt_clear_btn',       () => clearAllFacts())
       .on('click.fmt_actions', '#fmt_export_btn',      () => exportJson())
       .on('click.fmt_actions', '#fmt_import_btn',      () => importJson())
       .on('click.fmt_actions', '#fmt_scanlog_btn',     () => showScanLog());
 
-    // Filters — native getAttribute avoids jQuery .data() cache bug
     $(document).off('click.fmt_filter').on('click.fmt_filter', '.fmt-filter-btn', function () {
       const cat = this.getAttribute('data-cat');
       const imp = this.getAttribute('data-imp');
@@ -964,17 +926,16 @@
     }
   }
 
-  // ─── Sorting ──────────────────────────────────────────────────────────────────
-
+  // ─── БАГ 4 ИСПРАВЛЕН: flashbacks добавлена в catOrder
   function sortFacts(facts) {
     const impOrder = { high: 2, medium: 1, low: 0 };
-    const catOrder = { characters: 0, events: 1, secrets: 2 };
+    const catOrder = { characters: 0, events: 1, secrets: 2, flashbacks: 3 }; // ИСПРАВЛЕНО
     const mode = currentSortMode || 'date';
     const copy = [...facts];
     if (mode === 'importance')
       copy.sort((a, b) => (impOrder[b.importance] - impOrder[a.importance]) || (b.ts||0) - (a.ts||0));
     else if (mode === 'category')
-      copy.sort((a, b) => (catOrder[a.category]||0) - (catOrder[b.category]||0) || (b.ts||0) - (a.ts||0));
+      copy.sort((a, b) => ((catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99)) || (b.ts||0) - (a.ts||0));
     else
       copy.sort((a, b) => (b.ts||0) - (a.ts||0));
     return copy;
@@ -1020,7 +981,6 @@
 
     $('#fmt_subtitle').text(`${charName} · ${total} фактов · ${active} активных`);
 
-    // Token counter
     const block  = buildInjectedBlock(state, settings);
     const tokens = estimateTokens(block);
     const maxF   = settings.maxInjectFacts || 30;
@@ -1030,12 +990,10 @@
         : `<span class="fmt-tok-label fmt-tok-empty">Инъекция пуста — нет активных фактов выше порога</span>`
     );
 
-    // Sync sort
     currentSortMode = settings.sortMode || 'date';
     const $sortSel = $('#fmt_sort_select');
     if ($sortSel.length) $sortSel.val(currentSortMode);
 
-    // Sort & group
     const sorted  = sortFacts(state.facts);
     const grouped = {};
     for (const cat of Object.keys(CATEGORIES)) grouped[cat] = [];
@@ -1059,7 +1017,7 @@
       for (const [cat, meta] of Object.entries(CATEGORIES)) {
         const items = grouped[cat];
         if (!items.length) continue;
-        const isColl  = !!collapsedCats[cat];
+        const isColl    = !!collapsedCats[cat];
         const disabledN = items.filter(f => f.disabled).length;
         html += `
           <div class="fmt-cat-section" data-cat="${cat}">
@@ -1080,7 +1038,6 @@
     $('#fmt_add_btn').on('click', addFactManual);
     $('#fmt_add_text').on('keydown', e => { if (e.key === 'Enter') addFactManual(); });
 
-    // Collapse
     $(document).off('click.fmt_collapse').on('click.fmt_collapse', '.fmt-cat-header', function () {
       const cat = this.getAttribute('data-collapse-cat');
       if (!cat) return;
@@ -1089,7 +1046,6 @@
       $(this).find('.fmt-cat-chevron').text(collapsedCats[cat] ? '▸' : '▾');
     });
 
-    // Inline text edit
     $(document).off('click.fmt_edit').on('click.fmt_edit', '.fmt-fact-text', function () {
       const id  = this.getAttribute('data-id');
       const cur = this.textContent;
@@ -1109,7 +1065,6 @@
       });
     });
 
-    // Inline selects
     $(document).off('change.fmt_inlinecat').on('change.fmt_inlinecat', '.fmt-inline-cat', async function () {
       await updateFactField(this.getAttribute('data-id'), 'category', this.value);
     });
@@ -1117,19 +1072,16 @@
       await updateFactField(this.getAttribute('data-id'), 'importance', this.value);
     });
 
-    // Per-row flashback trigger
     $(document).off('click.fmt_flash_row').on('click.fmt_flash_row', '.fmt-flash-btn', async function (e) {
       e.stopPropagation();
       await triggerFlashback(this.getAttribute('data-id'));
     });
 
-    // Toggle
     $(document).off('click.fmt_toggle').on('click.fmt_toggle', '.fmt-toggle-btn', async function (e) {
       e.stopPropagation();
       await toggleDisableFact(this.getAttribute('data-id'));
     });
 
-    // Delete
     $(document).off('click.fmt_delete').on('click.fmt_delete', '.fmt-delete-btn', async function (e) {
       e.stopPropagation();
       await deleteFact(this.getAttribute('data-id'));
@@ -1169,7 +1121,6 @@
     const fact  = state.facts.find(f => f.id === id);
     if (!fact) return;
     fact.disabled = !fact.disabled;
-    // Patch DOM in-place
     const row = document.querySelector(`.fmt-fact-row[data-id="${id}"]`);
     if (row) {
       row.classList.toggle('fmt-fact-disabled', fact.disabled);
@@ -1179,7 +1130,6 @@
     await ctx().saveMetadata();
     await updateInjectedPrompt();
     await renderWidget();
-    // Refresh token bar only
     const block  = buildInjectedBlock(state, getSettings());
     const tokens = estimateTokens(block);
     const maxF   = getSettings().maxInjectFacts || 30;
@@ -1201,7 +1151,6 @@
     await renderWidget();
   }
 
-  // Ручное восстановление — ищем все ключи FMT для текущего персонажа
   async function recoverFacts() {
     const { chatMetadata, saveMetadata } = ctx();
     const exact  = chatKey();
@@ -1209,7 +1158,6 @@
     const charId = String(c.characterId ?? c.groupId ?? 'unknown');
     const prefix = `fmt_v1__${charId}__`;
 
-    // Собираем все ключи этого персонажа у которых есть факты
     const candidates = Object.keys(chatMetadata)
       .filter(k => k.startsWith(prefix) && Array.isArray(chatMetadata[k]?.facts) && chatMetadata[k].facts.length)
       .sort((a, b) => {
@@ -1223,7 +1171,6 @@
       return;
     }
 
-    // Берём самый свежий
     const bestKey   = candidates[0];
     const bestState = chatMetadata[bestKey];
     const n         = bestState.facts.length;
@@ -1233,7 +1180,6 @@
       return;
     }
 
-    // Мигрируем
     chatMetadata[exact] = bestState;
     await saveMetadata();
     await updateInjectedPrompt();
@@ -1335,7 +1281,6 @@
     })();
     const saveSec = () => { try { localStorage.setItem('fmt_sec_state', JSON.stringify(secState)); } catch {} };
 
-    // Helper: collapsible section
     const sec = (id, icon, title, content, defaultOpen = false) => {
       const open = secState[id] !== undefined ? secState[id] : defaultOpen;
       return `
@@ -1424,26 +1369,19 @@
       <div class="fmt-api-mode-bar">
         <div class="fmt-api-mode-label">Источник генерации:</div>
         <div class="fmt-api-mode-btns">
-          <button class="fmt-api-mode-btn ${!hasCustomApi?'active':''}" data-mode="st" title="Использовать модель которая уже подключена в ST">
-            🟢 ST (текущий)
-          </button>
-          <button class="fmt-api-mode-btn ${hasCustomApi?'active':''}" data-mode="custom" title="Указать отдельный API / прокси для сканирования">
-            🔌 Кастомный API
-          </button>
+          <button class="fmt-api-mode-btn ${!hasCustomApi?'active':''}" data-mode="st">🟢 ST (текущий)</button>
+          <button class="fmt-api-mode-btn ${hasCustomApi?'active':''}" data-mode="custom">🔌 Кастомный API</button>
         </div>
       </div>
-
       <div id="fmt_mode_st" ${hasCustomApi?'style="display:none"':''}>
         <div class="fmt-api-st-info">
           ✅ FMT использует модель которая сейчас подключена в SillyTavern.<br>
           Никаких дополнительных настроек не нужно — всё работает из коробки.
         </div>
       </div>
-
       <div id="fmt_mode_custom" ${!hasCustomApi?'style="display:none"':''}>
         <div style="font-size:10px;color:rgba(100,220,160,.6);margin-bottom:7px;line-height:1.5">
-          Отдельный API для сканирования — например более умная модель.<br>
-          Авто-перебор эндпоинтов и форматов. API Key необязателен для локальных прокси.
+          Отдельный API для сканирования. Авто-перебор эндпоинтов и форматов.
         </div>
         <div class="fmt-2col" style="margin-bottom:6px">
           <label class="fmt-ck"><input type="checkbox" id="fmt_fallback_enabled" ${s.fallbackEnabled!==false?'checked':''}><span>Fallback на ST если недоступен</span></label>
@@ -1484,7 +1422,6 @@
       </div>
     `);
 
-    // Accordion sections toggle
     $(document).off('click.fmt_sec').on('click.fmt_sec', '.fmt-sec-hdr', function () {
       const id   = this.getAttribute('data-sec');
       const body = $(this).next('.fmt-sec-body');
@@ -1495,7 +1432,6 @@
       saveSec();
     });
 
-    // Collapse entire block
     $('#fmt_collapse_btn').on('click', () => {
       s.collapsed = !s.collapsed;
       $('#fmt_settings_block .fmt-settings-body').toggle(!s.collapsed);
@@ -1503,13 +1439,11 @@
       ctx().saveSettingsDebounced();
     });
 
-    // Checkboxes
     $('#fmt_enabled').on('input',    async ev => { s.enabled    = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); await updateInjectedPrompt(); });
     $('#fmt_show_widget').on('input',async ev => { s.showWidget = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); await renderWidget(); });
     $('#fmt_auto_scan').on('input',       ev => { s.autoScan   = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); });
     $('#fmt_auto_marker').on('input',     ev => { s.autoMarker = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); });
 
-    // FAB scale
     $('#fmt_fab_scale').on('input', ev => {
       const v = parseFloat($(ev.currentTarget).val());
       s.fabScale = v;
@@ -1519,15 +1453,12 @@
       applyFabPosition();
     });
 
-    // Sliders
     $('#fmt_auto_every').on('input', ev => { const v = +$(ev.currentTarget).val(); s.autoScanEvery  = v; $('#fmt_auto_every_val').text(v);  ctx().saveSettingsDebounced(); });
     $('#fmt_scan_depth').on('input', ev => { const v = +$(ev.currentTarget).val(); s.scanDepth      = v; $('#fmt_scan_depth_val').text(v);  ctx().saveSettingsDebounced(); });
     $('#fmt_max_facts').on('input',  ev => { const v = +$(ev.currentTarget).val(); s.maxInjectFacts = v; $('#fmt_max_facts_val').text(v);   ctx().saveSettingsDebounced(); });
 
-    // Select
     $('#fmt_inject_imp').on('change', async ev => { s.injectImportance = $(ev.currentTarget).val(); ctx().saveSettingsDebounced(); await updateInjectedPrompt(); });
 
-    // Flashback settings
     $('#fmt_flash_enabled').on('input', ev => { s.flashEnabled = $(ev.currentTarget).prop('checked'); ctx().saveSettingsDebounced(); });
     $('#fmt_flash_chance').on('input', ev => {
       const v = +$(ev.currentTarget).val();
@@ -1542,7 +1473,6 @@
       ctx().saveSettingsDebounced();
     });
 
-    // Template
     $('#fmt_prompt_tpl').on('input', () => { s.promptTemplate = $('#fmt_prompt_tpl').val(); ctx().saveSettingsDebounced(); });
     $('#fmt_reset_tpl_btn').on('click', async () => {
       s.promptTemplate = DEFAULT_PROMPT_TEMPLATE;
@@ -1552,14 +1482,12 @@
       toastr.success('Шаблон сброшен');
     });
 
-    // API mode switcher (ST vs Custom)
     $(document).off('click.fmt_apimode').on('click.fmt_apimode', '.fmt-api-mode-btn', function () {
       const mode = this.getAttribute('data-mode');
       document.querySelectorAll('.fmt-api-mode-btn').forEach(b => b.classList.remove('active'));
       this.classList.add('active');
       if (mode === 'st') {
         $('#fmt_mode_st').show(); $('#fmt_mode_custom').hide();
-        // Сбрасываем кастовый API
         s.apiEndpoint = ''; s.apiKey = '';
         _workingApiConfig = null;
         ctx().saveSettingsDebounced();
@@ -1569,7 +1497,6 @@
       }
     });
 
-    // API fields
     $('#fmt_api_endpoint').on('input', () => {
       s.apiEndpoint = $('#fmt_api_endpoint').val().trim();
       _workingApiConfig = null;
@@ -1601,15 +1528,15 @@
       ctx().saveSettingsDebounced();
     });
 
-    // Тест соединения
+    // ─── БАГ 1 ИСПРАВЛЕН: сохраняем {base, url, builder} из testApiConnection
     $('#fmt_test_api').on('click', async () => {
       const $btn    = $('#fmt_test_api');
       const $status = $('#fmt_api_status');
       $btn.prop('disabled', true).text('⏳ Проверка…');
       $status.css('color', 'rgba(180,200,240,.5)').text('Перебираю эндпоинты…');
       try {
-        const cfg = await testApiConnection();
-        _workingApiConfig = { base: getBaseUrl(), ...cfg };
+        const cfg = await testApiConnection(); // возвращает {url, builder}
+        _workingApiConfig = { base: getBaseUrl(), url: cfg.url, builder: cfg.builder };
         $status.css('color', '#70e8c0').text(`✅ Работает: ${cfg.url.replace(getBaseUrl(), '')}`);
         toastr.success('[FMT] API отвечает корректно');
       } catch (e) {
@@ -1639,15 +1566,13 @@
 
     $(document)
       .off('click.fmt_settings')
-      .on('click.fmt_settings', '#fmt_open_drawer_btn',  () => openDrawer(true))
-      .on('click.fmt_settings', '#fmt_scan_settings_btn',() => runScan('manual'))
+      .on('click.fmt_settings', '#fmt_open_drawer_btn',   () => openDrawer(true))
+      .on('click.fmt_settings', '#fmt_scan_settings_btn', () => runScan('manual'))
       .on('click.fmt_settings', '#fmt_reset_pos_btn', () => {
         try { localStorage.removeItem(FAB_POS_KEY); } catch {}
         setFabDefault(); toastr.success('Позиция сброшена');
       });
   }
-
-  // ─── Flashback trigger ────────────────────────────────────────────────────────
 
   // ─── Flashback trigger ────────────────────────────────────────────────────────
 
@@ -1666,17 +1591,15 @@ ${catMeta.icon} «${fact.text}»
 [/ФЛЕШБЕК]`;
   }
 
-  // Инжектируем первый из очереди
   function applyFlashQueue() {
     if (!flashQueue.length) {
       try { ctx().setExtensionPrompt(FLASHBACK_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true); } catch {}
       return;
     }
-    const next  = flashQueue[0];
+    const next = flashQueue[0];
     try { ctx().setExtensionPrompt(FLASHBACK_TAG, next.block, EXT_PROMPT_TYPES.IN_PROMPT, 0, true); } catch {}
   }
 
-  // Добавить в очередь
   async function triggerFlashback(factId = null) {
     const s     = getSettings();
     const state = await getChatState();
@@ -1703,7 +1626,7 @@ ${catMeta.icon} «${fact.text}»
     };
 
     flashQueue.push(entry);
-    applyFlashQueue(); // обновляем промпт (если первый в очереди)
+    applyFlashQueue();
     renderFlashQueueUI();
 
     const qLen = flashQueue.length;
@@ -1713,7 +1636,6 @@ ${catMeta.icon} «${fact.text}»
       { timeOut: 4000 }
     );
 
-    // Подсветить строку факта
     const row = document.querySelector(`.fmt-fact-row[data-id="${fact.id}"]`);
     if (row) {
       row.classList.add('fmt-flash-highlight');
@@ -1721,19 +1643,15 @@ ${catMeta.icon} «${fact.text}»
     }
   }
 
-  // Срабатывает когда пришёл ответ бота — сдвигаем очередь
   function consumeFlashQueue() {
     if (!flashQueue.length) return;
     const fired = flashQueue.shift();
-    // Добавляем в историю
     flashHistory.unshift({ ...fired, fired: Date.now() });
     if (flashHistory.length > MAX_FLASH_HISTORY) flashHistory.length = MAX_FLASH_HISTORY;
-    // Применяем следующий или очищаем
     applyFlashQueue();
     renderFlashQueueUI();
   }
 
-  // Удалить конкретный элемент из очереди
   function removeFromFlashQueue(id) {
     const idx = flashQueue.findIndex(e => e.id === id);
     if (idx < 0) return;
@@ -1743,7 +1661,6 @@ ${catMeta.icon} «${fact.text}»
     toastr.info('[FMT] Флешбек убран из очереди', '', { timeOut: 2000 });
   }
 
-  // Очистить всю очередь
   function clearFlashQueue() {
     flashQueue.length = 0;
     try { ctx().setExtensionPrompt(FLASHBACK_TAG, '', EXT_PROMPT_TYPES.IN_PROMPT, 0, true); } catch {}
@@ -1751,7 +1668,6 @@ ${catMeta.icon} «${fact.text}»
     toastr.info('[FMT] Очередь флешбеков очищена', '', { timeOut: 2000 });
   }
 
-  // Render очереди и истории в дровере
   function renderFlashQueueUI() {
     const $panel = $('#fmt_flash_panel');
     if (!$panel.length) return;
@@ -1759,10 +1675,7 @@ ${catMeta.icon} «${fact.text}»
     const hasQueue   = flashQueue.length > 0;
     const hasHistory = flashHistory.length > 0;
 
-    if (!hasQueue && !hasHistory) {
-      $panel.hide();
-      return;
-    }
+    if (!hasQueue && !hasHistory) { $panel.hide(); return; }
 
     $panel.show();
     let html = '';
@@ -1801,13 +1714,13 @@ ${catMeta.icon} «${fact.text}»
     }
 
     $panel.html(html);
-
     $panel.find('.fmt-fq-clear-all').off('click').on('click', clearFlashQueue);
     $panel.find('.fmt-fq-remove').off('click').on('click', function () {
       removeFromFlashQueue(this.getAttribute('data-qid'));
     });
   }
 
+  // ─── Events ───────────────────────────────────────────────────────────────────
 
   function wireChatEvents() {
     const { eventSource, event_types } = ctx();
@@ -1827,12 +1740,13 @@ ${catMeta.icon} «${fact.text}»
     });
 
     eventSource.on(event_types.MESSAGE_RECEIVED, async (idx) => {
-      // Сдвигаем очередь флешбеков — сработавший уходит в историю
       consumeFlashQueue();
-
       const { chat } = ctx();
       const msg = chat?.[idx];
-      if (msg && !msg.is_user) await detectFactMarkers(msg.mes || '');
+      if (msg && !msg.is_user) {
+        await detectFactMarkers(msg.mes || '');
+        await detectFlashbackMarkers(msg.mes || '');
+      }
       await renderWidget();
       const s = getSettings();
       if (!s.autoScan) return;
@@ -1842,7 +1756,6 @@ ${catMeta.icon} «${fact.text}»
 
     eventSource.on(event_types.MESSAGE_SENT, async () => {
       await renderWidget();
-      // Авто-шанс флешбека: срабатывает при отправке сообщения юзером
       const s = getSettings();
       if (!s.flashEnabled || !s.flashChance || flashQueue.length > 0) return;
       if (Math.random() * 100 < s.flashChance) await triggerFlashback();
@@ -1852,7 +1765,7 @@ ${catMeta.icon} «${fact.text}»
   // ─── Boot ─────────────────────────────────────────────────────────────────────
 
   jQuery(() => {
-    try { wireChatEvents(); console.log('[FMT] v1.2.0 loaded'); }
+    try { wireChatEvents(); console.log('[FMT] v1.3.1 loaded'); } // ИСПРАВЛЕНО: версия
     catch (e) { console.error('[FMT] init failed', e); }
   });
 
