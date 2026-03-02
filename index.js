@@ -1,13 +1,13 @@
 /**
  * Facts Memory Tracker (FMT) — SillyTavern Extension
- * v1.3.1
+ * v1.3.3
  *
- * Fixes in v1.3.1:
- *  - БАГ 1: _workingApiConfig после «Тест соединения» не имел builder → cfg.builder is not a function
- *  - БАГ 2: detectFlashbackMarkers вызывал getChatState() без true → факты не сохранялись
- *  - БАГ 3: Фильтр-кнопка для категории flashbacks отсутствовала в drawer
- *  - БАГ 4: sortFacts не знал о flashbacks → перемешивалась с characters
- *  - Косметика: версия в console.log исправлена на v1.3.1
+ * Fixes in v1.3.3:
+ *  - ГЛАВНЫЙ ФИX: generateRaw теперь вызывается с quietToChat=TRUE →
+ *    "No message generated" больше не появляется в чате при сканировании
+ *  - Архитектура API переписана: ST — основной путь, кастовый API — опциональный
+ *  - Понятные сообщения об ошибках с конкретными советами что проверить
+ *  - Предыдущие фиксы v1.3.1 и v1.3.2 сохранены
  */
 
 (() => {
@@ -320,32 +320,43 @@
 
   let _workingApiConfig = null;
 
+  // ─── Основная функция генерации ──────────────────────────────────────────────
+  //
+  // ЛОГИКА:
+  //  1. Если кастовый API настроен (endpoint задан) → пробуем его
+  //  2. Иначе → используем ST generateRaw (то что подключено в Chat Completion)
+  //
+  // ВАЖНО: generateRaw вызывается с quietToChat = TRUE чтобы ошибки не
+  // показывались в чате как "No message generated"
+  //
   async function aiGenerate(userPrompt, systemPrompt) {
     const s    = getSettings();
     const base = getBaseUrl();
-    const apiKey = (s.apiKey || '').trim();
 
+    // ── Путь 1: кастовый API (опционально) ───────────────────────────────────
     if (base) {
+      const apiKey = (s.apiKey || '').trim();
       const headers = {
         'Content-Type': 'application/json',
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       };
 
+      // Используем запомненный рабочий конфиг если он есть
       if (_workingApiConfig?.base === base) {
         try {
           const result = await callApiWithConfig(_workingApiConfig, userPrompt, systemPrompt, headers);
-          if (result !== null) return result;
+          if (result?.trim()) return result;
         } catch {}
-        _workingApiConfig = null;
+        _workingApiConfig = null; // конфиг протух — сбрасываем
       }
 
+      // Перебираем эндпоинты и форматы
       const endpoints = [
         `${base}/v1/chat/completions`,
         `${base}/chat/completions`,
         `${base}/v1/completions`,
         `${base}/completions`,
       ];
-
       const bodyBuilders = [
         (m) => ({ model: m, max_tokens: 1024, temperature: 0.1,
           messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] }),
@@ -356,6 +367,7 @@
       ];
 
       const model = s.apiModel || 'gpt-4o-mini';
+      const errors = [];
 
       for (const url of endpoints) {
         for (const builder of bodyBuilders) {
@@ -363,30 +375,66 @@
             const resp = await fetch(url, {
               method: 'POST', headers, body: JSON.stringify(builder(model)),
             });
-            if (!resp.ok) continue;
+            if (!resp.ok) { errors.push(`HTTP ${resp.status} @ ${url}`); continue; }
             const data = await resp.json();
             const text = extractTextFromResponse(data);
-            if (text !== null) {
+            if (text?.trim()) {
               _workingApiConfig = { base, url, builder };
               return text;
             }
-          } catch {}
+          } catch (e) {
+            errors.push(`${e.message} @ ${url}`);
+          }
         }
       }
 
-      console.warn('[FMT] Кастомный API не ответил — откат на ST generateRaw');
-      if (s.fallbackEnabled !== false) {
-        toastr.warning('[FMT] Кастовый API не отвечает — используется встроенный ST', '', { timeOut: 4000 });
-      } else {
-        throw new Error('Кастовый API не ответил. Проверь настройки или включи fallback на ST.');
+      // Кастовый API не сработал
+      const errSummary = errors.slice(-2).join(' | ');
+      if (s.fallbackEnabled === false) {
+        throw new Error(`Кастовый API не ответил: ${errSummary}`);
       }
+      console.warn(`[FMT] Кастовый API не ответил (${errSummary}) — используем ST`);
+      toastr.warning('[FMT] Кастовый API недоступен — используется ST', '', { timeOut: 3000 });
     }
 
+    // ── Путь 2: ST generateRaw — основной способ ─────────────────────────────
+    // quietToChat = TRUE (4-й аргумент) — критично: без этого ST показывает
+    // "No message generated" прямо в интерфейсе чата при любой ошибке
     const c = ctx();
-    if (typeof c.generateRaw === 'function')
-      return await c.generateRaw(userPrompt, null, false, false, systemPrompt, true);
+    if (typeof c.generateRaw !== 'function') {
+      throw new Error(
+        'generateRaw недоступен в этой версии ST. ' +
+        'Убедись что ST обновлён, или настрой кастовый API в разделе 🔌 API настроек FMT.'
+      );
+    }
 
-    throw new Error('Нет доступного API для генерации.');
+    let result;
+    try {
+      result = await c.generateRaw(
+        userPrompt,    // prompt
+        null,          // api — null = использовать текущий Chat Completion
+        false,         // instructOverride
+        true,          // quietToChat = TRUE — ошибки не показываются в чате !!
+        systemPrompt,  // system prompt
+        true           // quietToChat2 (дополнительный флаг в новых версиях ST)
+      );
+    } catch (e) {
+      throw new Error(
+        `Ошибка генерации через ST: ${e.message}. ` +
+        'Проверь: 1) подключена ли модель в Chat Completion, 2) нет ли активного RP-чата который мешает.'
+      );
+    }
+
+    if (!result?.trim()) {
+      throw new Error(
+        'Модель вернула пустой ответ. Возможные причины: ' +
+        '1) модель не подключена в ST, ' +
+        '2) контекст слишком большой — уменьши «Глубину» в настройках сканирования, ' +
+        '3) модель не умеет возвращать чистый JSON — подключи кастовый API с GPT-4o или аналогом.'
+      );
+    }
+
+    return result;
   }
 
   async function callApiWithConfig(cfg, userPrompt, systemPrompt, headers) {
@@ -436,6 +484,38 @@
 Если нет новых фактов — верни [].${existing}`;
   }
 
+  // Вытаскивает JSON-массив из ответа модели даже если она добавила текст вокруг него
+  function parseFactsJson(raw) {
+    if (!raw) return null;
+
+    // 1. Убираем markdown fence и пробуем прямой парсинг
+    const clean = raw.replace(/```json|```/gi, '').trim();
+    try {
+      const p = JSON.parse(clean);
+      if (Array.isArray(p)) return p;
+    } catch {}
+
+    // 2. Ищем JSON-массив внутри текста (модель написала пояснение + JSON)
+    const match = raw.match(/\[[\s\S]*?\]/);
+    if (match) {
+      try {
+        const p = JSON.parse(match[0]);
+        if (Array.isArray(p)) return p;
+      } catch {}
+    }
+
+    // 3. Ищем многострочный массив
+    const matchMulti = raw.match(/\[[\s\S]+\]/);
+    if (matchMulti) {
+      try {
+        const p = JSON.parse(matchMulti[0]);
+        if (Array.isArray(p)) return p;
+      } catch {}
+    }
+
+    return null; // не смогли — возвращаем null, вызывающий обработает
+  }
+
   async function extractFacts(fromIdx, toIdx) {
     const state = await getChatState(true);
     const { text } = getMessages(fromIdx, toIdx - fromIdx);
@@ -447,9 +527,17 @@
 
     const raw   = await aiGenerate(user, system);
     if (!raw) return 0;
-    const clean = raw.replace(/```json|```/gi, '').trim();
-    const parsed = JSON.parse(clean);
-    if (!Array.isArray(parsed)) return 0;
+
+    const parsed = parseFactsJson(raw);
+    if (!parsed) {
+      // Модель вернула не-JSON — логируем первые 200 символов для диагностики
+      const preview = raw.slice(0, 200).replace(/\n/g, ' ');
+      console.warn(`[FMT] Модель вернула не-JSON: «${preview}»`);
+      throw new Error(
+        `Модель вернула ответ не в формате JSON. Первые символы: «${raw.slice(0, 80)}». ` +
+        'Попробуй другую модель или кастовый API с более умной моделью (GPT-4o, Claude и т.д.)'
+      );
+    }
 
     const SIM_THRESHOLD = 0.40;
     const pool = state.facts.map(f => f.text);
@@ -536,9 +624,16 @@
 
   async function runScan(mode = 'manual') {
     if (scanInProgress) { toastr.warning('[FMT] Сканирование уже идёт…'); return; }
+
     const settings = getSettings();
-    const { chat }  = ctx();
-    if (!Array.isArray(chat) || !chat.length) { toastr.warning('[FMT] История чата пуста'); return; }
+
+    // Более надёжное получение чата — ctx().chat может быть undefined сразу после CHAT_CHANGED
+    const c = ctx();
+    const chat = c.chat ?? c.getChat?.() ?? [];
+    if (!Array.isArray(chat) || !chat.length) {
+      toastr.warning('[FMT] История чата пуста или ещё не загружена. Попробуй через секунду.');
+      return;
+    }
 
     scanInProgress = true;
     const $btn = $('#fmt_scan_btn, #fmt_scan_settings_btn');
@@ -1734,6 +1829,9 @@ ${catMeta.icon} «${fact.text}»
 
     eventSource.on(event_types.CHAT_CHANGED, async () => {
       msgSinceLastScan = 0;
+      scanInProgress = false; // сбрасываем на случай если предыдущий скан завис
+      // Небольшая задержка — chat[] заполняется асинхронно после события
+      await new Promise(r => setTimeout(r, 300));
       await updateInjectedPrompt();
       await renderWidget();
       if ($('#fmt_drawer').hasClass('fmt-open')) await renderDrawer();
@@ -1765,7 +1863,7 @@ ${catMeta.icon} «${fact.text}»
   // ─── Boot ─────────────────────────────────────────────────────────────────────
 
   jQuery(() => {
-    try { wireChatEvents(); console.log('[FMT] v1.3.1 loaded'); } // ИСПРАВЛЕНО: версия
+    try { wireChatEvents(); console.log('[FMT] v1.3.3 loaded'); }
     catch (e) { console.error('[FMT] init failed', e); }
   });
 
