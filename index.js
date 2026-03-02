@@ -105,21 +105,85 @@
 
   function chatKey() {
     const c = ctx();
-    const chatId = (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() : null) || c.chatId || 'unknown';
+    // chatId может меняться при ребрейнче/авто-сохранении — берём всё что есть
+    const chatId = (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() : null)
+      || c.chatId
+      || c.chat_id
+      || 'unknown';
     const charId = c.characterId ?? c.groupId ?? 'unknown';
     return `fmt_v1__${charId}__${chatId}`;
   }
 
-  async function getChatState() {
-    const { chatMetadata, saveMetadata } = ctx();
-    const key = chatKey();
-    if (!chatMetadata[key]) {
-      chatMetadata[key] = { facts: [], lastScannedMsgIndex: 0, scanLog: [] };
-      await saveMetadata();
+  // Ищем данные по точному ключу, потом по похожим (тот же charId, другой chatId)
+  function findExistingStateKey(chatMetadata) {
+    const exact = chatKey();
+    if (chatMetadata[exact]?.facts?.length) return exact;
+
+    const c      = ctx();
+    const charId = String(c.characterId ?? c.groupId ?? 'unknown');
+    const prefix = `fmt_v1__${charId}__`;
+
+    // Ищем ключ с тем же персонажем у которого есть факты
+    let bestKey  = null;
+    let bestTime = 0;
+    for (const k of Object.keys(chatMetadata)) {
+      if (!k.startsWith(prefix)) continue;
+      const state = chatMetadata[k];
+      if (!Array.isArray(state?.facts) || !state.facts.length) continue;
+      // Берём самый свежий (у последнего факта максимальный ts)
+      const lastTs = state.facts.reduce((mx, f) => Math.max(mx, f.ts || 0), 0);
+      if (lastTs > bestTime) { bestTime = lastTs; bestKey = k; }
     }
-    if (!chatMetadata[key].scanLog) chatMetadata[key].scanLog = [];
-    return chatMetadata[key];
+    return bestKey; // null если ничего нет
   }
+
+  // Создать пустой стейт без немедленного сохранения
+  function emptyState() {
+    return { facts: [], lastScannedMsgIndex: 0, scanLog: [] };
+  }
+
+  // Основной метод — никогда не создаёт пустой стейт при простом чтении
+  async function getChatState(createIfMissing = false) {
+    const { chatMetadata, saveMetadata } = ctx();
+
+    // Сначала пробуем точный ключ
+    const exact = chatKey();
+    if (chatMetadata[exact]) {
+      if (!chatMetadata[exact].scanLog) chatMetadata[exact].scanLog = [];
+      return chatMetadata[exact];
+    }
+
+    // Ищем данные под похожим ключом (тот же персонаж, другой chatId)
+    const recovered = findExistingStateKey(chatMetadata);
+    if (recovered) {
+      // Мигрируем под актуальный ключ
+      chatMetadata[exact] = chatMetadata[recovered];
+      // Старый ключ оставляем как резервную копию (не удаляем)
+      if (!chatMetadata[exact].scanLog) chatMetadata[exact].scanLog = [];
+      console.info(`[FMT] Факты восстановлены с ключа ${recovered} → ${exact}`);
+      // Сообщаем пользователю что данные были восстановлены
+      setTimeout(() => toastr.success(
+        `🧠 FMT: факты восстановлены (${chatMetadata[exact].facts.length} шт.)`,
+        'Восстановление данных',
+        { timeOut: 5000 }
+      ), 500);
+      await saveMetadata();
+      return chatMetadata[exact];
+    }
+
+    // Данных нет совсем — создаём только если явно запрошено (скан, добавление)
+    if (createIfMissing) {
+      chatMetadata[exact] = emptyState();
+      await saveMetadata();
+    } else {
+      // Для чтения (виджет, рендер) возвращаем временный пустой объект — не сохраняем
+      return emptyState();
+    }
+
+    if (!chatMetadata[exact].scanLog) chatMetadata[exact].scanLog = [];
+    return chatMetadata[exact];
+  }
+
 
   // ─── Utils ────────────────────────────────────────────────────────────────────
 
@@ -409,7 +473,7 @@
   }
 
   async function extractFacts(fromIdx, toIdx) {
-    const state = await getChatState();
+    const state = await getChatState(true);
     const { text } = getMessages(fromIdx, toIdx - fromIdx);
     if (!text.trim()) return 0;
 
@@ -450,7 +514,7 @@
     const matches = [...messageText.matchAll(FACT_MARKER_RE)];
     if (!matches.length) return;
 
-    const state = await getChatState();
+    const state = await getChatState(true);
     const pool  = state.facts.map(f => f.text);
     const SIM   = 0.40;
     let changed = false;
@@ -519,7 +583,7 @@
     $btn.prop('disabled', true).text('⏳ Анализ…');
 
     try {
-      const state   = await getChatState();
+      const state   = await getChatState(true);
       const fromIdx = mode === 'auto'
         ? state.lastScannedMsgIndex
         : Math.max(0, chat.length - settings.scanDepth);
@@ -797,6 +861,7 @@
           <button type="button" id="fmt_import_btn">📥 Импорт</button>
           <button type="button" id="fmt_show_prompt_btn">Промпт</button>
           <button type="button" id="fmt_scanlog_btn">📋 Лог</button>
+          <button type="button" id="fmt_recover_btn" title="Найти факты под другим ключом (если слетели)">🔄 Восстановить</button>
           <button type="button" id="fmt_clear_btn" title="Очистить все факты">🗑️</button>
           <button type="button" id="fmt_close2" style="pointer-events:auto">Закрыть</button>
         </div>
@@ -815,6 +880,7 @@
       .on('click.fmt_actions', '#fmt_scan_btn',        () => runScan('manual'))
       .on('click.fmt_actions', '#fmt_flashback_btn',   () => triggerFlashback())
       .on('click.fmt_actions', '#fmt_show_prompt_btn', () => showPromptPreview())
+      .on('click.fmt_actions', '#fmt_recover_btn',    () => recoverFacts())
       .on('click.fmt_actions', '#fmt_clear_btn',       () => clearAllFacts())
       .on('click.fmt_actions', '#fmt_export_btn',      () => exportJson())
       .on('click.fmt_actions', '#fmt_import_btn',      () => importJson())
@@ -1079,7 +1145,7 @@
     const category   = String($('#fmt_add_cat').val() ?? 'events');
     const importance = String($('#fmt_add_imp').val() ?? 'medium');
     if (!text) { toastr.warning('Введите текст факта'); return; }
-    const state = await getChatState();
+    const state = await getChatState(true);
     state.facts.unshift({ id: makeId(), category, text, importance, msgIdx: 0, ts: Date.now() });
     $('#fmt_add_text').val('');
     await ctx().saveMetadata();
@@ -1089,7 +1155,7 @@
   }
 
   async function updateFactField(id, field, value) {
-    const state = await getChatState();
+    const state = await getChatState(true);
     const fact  = state.facts.find(f => f.id === id);
     if (!fact) return;
     fact[field] = value;
@@ -1099,7 +1165,7 @@
   }
 
   async function toggleDisableFact(id) {
-    const state = await getChatState();
+    const state = await getChatState(true);
     const fact  = state.facts.find(f => f.id === id);
     if (!fact) return;
     fact.disabled = !fact.disabled;
@@ -1126,7 +1192,7 @@
   }
 
   async function deleteFact(id) {
-    const state = await getChatState();
+    const state = await getChatState(true);
     const idx   = state.facts.findIndex(f => f.id === id);
     if (idx >= 0) state.facts.splice(idx, 1);
     await ctx().saveMetadata();
@@ -1135,11 +1201,52 @@
     await renderWidget();
   }
 
+  // Ручное восстановление — ищем все ключи FMT для текущего персонажа
+  async function recoverFacts() {
+    const { chatMetadata, saveMetadata } = ctx();
+    const exact  = chatKey();
+    const c      = ctx();
+    const charId = String(c.characterId ?? c.groupId ?? 'unknown');
+    const prefix = `fmt_v1__${charId}__`;
+
+    // Собираем все ключи этого персонажа у которых есть факты
+    const candidates = Object.keys(chatMetadata)
+      .filter(k => k.startsWith(prefix) && Array.isArray(chatMetadata[k]?.facts) && chatMetadata[k].facts.length)
+      .sort((a, b) => {
+        const ta = chatMetadata[a].facts.reduce((mx, f) => Math.max(mx, f.ts || 0), 0);
+        const tb = chatMetadata[b].facts.reduce((mx, f) => Math.max(mx, f.ts || 0), 0);
+        return tb - ta;
+      });
+
+    if (!candidates.length) {
+      toastr.warning('[FMT] Сохранённых фактов для этого персонажа не найдено ни под одним ключом');
+      return;
+    }
+
+    // Берём самый свежий
+    const bestKey   = candidates[0];
+    const bestState = chatMetadata[bestKey];
+    const n         = bestState.facts.length;
+
+    if (bestKey === exact) {
+      toastr.info(`[FMT] Данные уже актуальны (${n} фактов)`);
+      return;
+    }
+
+    // Мигрируем
+    chatMetadata[exact] = bestState;
+    await saveMetadata();
+    await updateInjectedPrompt();
+    await renderDrawer();
+    await renderWidget();
+    toastr.success(`✅ Восстановлено ${n} фактов!`, 'FMT', { timeOut: 5000 });
+  }
+
   async function clearAllFacts() {
     const { Popup } = ctx();
     const ok = await Popup.show.confirm('Очистить все факты?', 'Действие нельзя отменить.');
     if (!ok) return;
-    const state = await getChatState();
+    const state = await getChatState(true);
     state.facts = []; state.lastScannedMsgIndex = 0;
     await ctx().saveMetadata();
     await updateInjectedPrompt();
