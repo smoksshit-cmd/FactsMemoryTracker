@@ -53,6 +53,7 @@
     autoScan:         true,
     autoScanEvery:    20,
     scanDepth:        40,
+    scanMaxChars:     280000, // ~70k токенов на батч (4 символа ≈ 1 токен)
     injectImportance: 'medium',
     maxInjectFacts:   30,
     promptTemplate:   DEFAULT_PROMPT_TEMPLATE,
@@ -472,36 +473,76 @@
 Если нет новых фактов — верни [].${existing}`;
   }
 
-  async function extractFacts(fromIdx, toIdx) {
-    const state = await getChatState(true);
-    const { text } = getMessages(fromIdx, toIdx - fromIdx);
-    if (!text.trim()) return 0;
+  // Токенов в одном скан-запросе: system + charCard + сообщения должны влезть
+  // Берём консервативно — 70к токенов на сообщения (≈ 280к символов)
+  const SCAN_CHARS_PER_BATCH = 280_000;
 
+  // Извлечение из одного батча сообщений
+  async function extractFactsBatch(msgText, existingFacts) {
     const charCard = getCharacterCard();
-    const system   = buildSystemPrompt(state.facts);
-    const user     = `${charCard ? `КАРТОЧКА ПЕРСОНАЖА:\n${charCard}\n\n` : ''}━━━ СООБЩЕНИЯ ━━━\n${text}\n\nИзвлеки новые факты. Верни JSON-массив.`;
+    const system   = buildSystemPrompt(existingFacts);
+    const user     = `${charCard ? `КАРТОЧКА ПЕРСОНАЖА:\n${charCard}\n\n` : ''}━━━ СООБЩЕНИЯ ━━━\n${msgText}\n\nИзвлеки новые факты. Верни JSON-массив.`;
 
-    const raw   = await aiGenerate(user, system);
-    if (!raw) return 0;
-    const clean = raw.replace(/```json|```/gi, '').trim();
-    const parsed = JSON.parse(clean);
-    if (!Array.isArray(parsed)) return 0;
+    const raw = await aiGenerate(user, system);
+    if (!raw) return [];
+    const clean  = raw.replace(/```json|```/gi, '').trim();
+    try {
+      const parsed = JSON.parse(clean);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  }
+
+  async function extractFacts(fromIdx, toIdx) {
+    const state   = await getChatState(true);
+    const { chat } = ctx();
+    if (!Array.isArray(chat)) return 0;
+
+    // Собираем сообщения по одному, нарезаем на батчи по символам
+    const msgs = chat.slice(fromIdx, toIdx);
+    if (!msgs.length) return 0;
+
+    // Нарезаем батчи: каждое сообщение отдельной строкой, режем по лимиту символов
+    const maxChars  = getSettings().scanMaxChars || SCAN_CHARS_PER_BATCH;
+    const batches   = [];
+    let batchLines  = [];
+    let batchChars  = 0;
+
+    for (const m of msgs) {
+      const line = `${m.is_user ? '{{user}}' : (m.name || '{{char}}')}: ${(m.mes || '').trim()}`;
+      if (batchChars + line.length > maxChars && batchLines.length) {
+        batches.push(batchLines.join('\n\n'));
+        batchLines = []; batchChars = 0;
+      }
+      batchLines.push(line);
+      batchChars += line.length;
+    }
+    if (batchLines.length) batches.push(batchLines.join('\n\n'));
 
     const SIM_THRESHOLD = 0.40;
     const pool = state.facts.map(f => f.text);
     let added  = 0;
 
-    for (const item of parsed) {
-      if (!item.text || !item.category || !(item.category in CATEGORIES)) continue;
-      if (!item.importance || !(item.importance in IMPORTANCE)) item.importance = 'medium';
-      if (pool.some(ex => similarity(ex, item.text) >= SIM_THRESHOLD)) continue;
-      state.facts.unshift({
-        id: makeId(), category: item.category, text: item.text.trim(),
-        importance: item.importance, msgIdx: toIdx, ts: Date.now(),
-      });
-      pool.push(item.text);
-      added++;
+    for (let bi = 0; bi < batches.length; bi++) {
+      if (batches.length > 1) {
+        const $btn = $('#fmt_scan_btn, #fmt_scan_settings_btn');
+        $btn.text(`⏳ Батч ${bi + 1}/${batches.length}…`);
+      }
+
+      const items = await extractFactsBatch(batches[bi], state.facts);
+
+      for (const item of items) {
+        if (!item.text || !item.category || !(item.category in CATEGORIES)) continue;
+        if (!item.importance || !(item.importance in IMPORTANCE)) item.importance = 'medium';
+        if (pool.some(ex => similarity(ex, item.text) >= SIM_THRESHOLD)) continue;
+        state.facts.unshift({
+          id: makeId(), category: item.category, text: item.text.trim(),
+          importance: item.importance, msgIdx: toIdx, ts: Date.now(),
+        });
+        pool.push(item.text);
+        added++;
+      }
     }
+
     state.lastScannedMsgIndex = toIdx;
     return added;
   }
@@ -606,8 +647,7 @@
       if (mode === 'manual') {
         if (added === 0) toastr.info('🔍 Новых фактов не найдено', 'FMT', { timeOut: 4000 });
         else toastr.success(`✅ Извлечено: <b>${added}</b> фактов`, 'FMT', { timeOut: 5000, escapeHtml: false });
-      }
-    } catch (e) {
+      }    } catch (e) {
       console.error('[FMT] scan failed', e);
       toastr.error(`[FMT] Ошибка: ${e.message}`);
     } finally {
@@ -1378,6 +1418,14 @@
         <label>Глубина:</label>
         <input type="range" id="fmt_scan_depth" min="10" max="200" step="10" value="${s.scanDepth}">
         <span id="fmt_scan_depth_val">${s.scanDepth}</span><span style="opacity:.5;font-size:10px">сообщ.</span>
+      </div>
+      <div class="fmt-srow fmt-slider-row">
+        <label>Лимит токенов/батч:</label>
+        <input type="range" id="fmt_scan_maxchars" min="40000" max="400000" step="20000" value="${s.scanMaxChars||280000}">
+        <span id="fmt_scan_maxchars_val">~${Math.round((s.scanMaxChars||280000)/4000)}k</span>
+      </div>
+      <div style="font-size:10px;color:rgba(180,200,240,.4);margin-top:-4px;line-height:1.4">
+        Большой чат автоматически делится на батчи под этот лимит.
       </div>`;
 
     const secInject = `
@@ -1522,6 +1570,12 @@
     // Sliders
     $('#fmt_auto_every').on('input', ev => { const v = +$(ev.currentTarget).val(); s.autoScanEvery  = v; $('#fmt_auto_every_val').text(v);  ctx().saveSettingsDebounced(); });
     $('#fmt_scan_depth').on('input', ev => { const v = +$(ev.currentTarget).val(); s.scanDepth      = v; $('#fmt_scan_depth_val').text(v);  ctx().saveSettingsDebounced(); });
+    $('#fmt_scan_maxchars').on('input', ev => {
+      const v = +$(ev.currentTarget).val();
+      s.scanMaxChars = v;
+      $('#fmt_scan_maxchars_val').text(`~${Math.round(v/4000)}k`);
+      ctx().saveSettingsDebounced();
+    });
     $('#fmt_max_facts').on('input',  ev => { const v = +$(ev.currentTarget).val(); s.maxInjectFacts = v; $('#fmt_max_facts_val').text(v);   ctx().saveSettingsDebounced(); });
 
     // Select
