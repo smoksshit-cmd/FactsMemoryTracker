@@ -702,6 +702,151 @@
     }
   }
 
+  // ─── Range scan ───────────────────────────────────────────────────────────────
+
+  async function runScanRange() {
+    const c    = ctx();
+    const chat = c.chat ?? c.getChat?.() ?? [];
+    if (!Array.isArray(chat) || !chat.length) {
+      toastr.warning('[FMT] История чата пуста или ещё не загружена.');
+      return;
+    }
+
+    const total = chat.length;
+
+    // No await — same Popup timing fix
+    c.Popup.show.text('🎯 FMT — Сканировать диапазон',
+      `<div style="font-size:13px;color:#c8deff">
+        <div style="margin-bottom:12px;opacity:.75">
+          Всего сообщений в чате: <b style="color:#90b8f8">${total}</b><br>
+          <span style="font-size:11px;opacity:.7">Нумерация с 1. Скрытые сообщения и саммари пропускаются автоматически.</span>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">От сообщения №</label>
+            <input id="fmt_range_from" type="number" min="1" max="${total}" value="1"
+              style="width:90px;padding:7px 10px;border-radius:8px;border:1px solid rgba(100,160,255,0.3);background:rgba(5,12,25,.9);color:#d8e8ff;font-size:14px;font-weight:700;text-align:center">
+          </div>
+          <div style="font-size:20px;opacity:.4;padding-top:18px">→</div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">До сообщения №</label>
+            <input id="fmt_range_to" type="number" min="1" max="${total}" value="${total}"
+              style="width:90px;padding:7px 10px;border-radius:8px;border:1px solid rgba(100,160,255,0.3);background:rgba(5,12,25,.9);color:#d8e8ff;font-size:14px;font-weight:700;text-align:center">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">Сообщений</label>
+            <div id="fmt_range_count"
+              style="width:56px;padding:7px 10px;border-radius:8px;border:1px solid rgba(100,160,255,0.1);background:rgba(100,160,255,0.06);color:#90b8f8;font-size:14px;font-weight:700;text-align:center">
+              ${total}
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <button class="fmt-range-preset" data-preset="last50"
+            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            Последние 50
+          </button>
+          <button class="fmt-range-preset" data-preset="last100"
+            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            Последние 100
+          </button>
+          <button class="fmt-range-preset" data-preset="all"
+            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            Весь чат
+          </button>
+          <button class="fmt-range-preset" data-preset="first50"
+            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            Первые 50
+          </button>
+        </div>
+        <button id="fmt_range_go"
+          style="width:100%;padding:10px;border-radius:8px;border:1px solid rgba(80,200,140,0.5);background:rgba(60,180,120,0.15);color:#70e8c0;cursor:pointer;font-size:13px;font-weight:700;margin-top:2px">
+          🔍 Сканировать диапазон
+        </button>
+        <div id="fmt_range_status" style="margin-top:8px;font-size:11px;min-height:14px;text-align:center"></div>
+      </div>`
+    );
+
+    setTimeout(() => {
+      const $from   = $('#fmt_range_from');
+      const $to     = $('#fmt_range_to');
+      const $count  = $('#fmt_range_count');
+      const $status = $('#fmt_range_status');
+
+      const updateCount = () => {
+        const f = parseInt($from.val()) || 1;
+        const t = parseInt($to.val())   || total;
+        const n = Math.max(0, t - f + 1);
+        $count.text(n);
+        $count.css('color', n > 0 ? '#90b8f8' : '#ff7070');
+      };
+
+      $from.on('input', updateCount);
+      $to.on('input',   updateCount);
+
+      // Preset buttons
+      document.querySelectorAll('.fmt-range-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const preset = btn.getAttribute('data-preset');
+          if (preset === 'last50')  { $from.val(Math.max(1, total - 49)); $to.val(total); }
+          if (preset === 'last100') { $from.val(Math.max(1, total - 99)); $to.val(total); }
+          if (preset === 'all')     { $from.val(1); $to.val(total); }
+          if (preset === 'first50') { $from.val(1); $to.val(Math.min(total, 50)); }
+          updateCount();
+        });
+      });
+
+      document.getElementById('fmt_range_go')?.addEventListener('click', async () => {
+        const fromNum = parseInt($from.val()) || 1;
+        const toNum   = parseInt($to.val())   || total;
+
+        if (fromNum > toNum) {
+          $status.css('color', '#ff7070').text('❌ «От» не может быть больше «До»');
+          return;
+        }
+        if (fromNum < 1 || toNum > total) {
+          $status.css('color', '#ff7070').text(`❌ Допустимый диапазон: 1 – ${total}`);
+          return;
+        }
+
+        const fromIdx = fromNum - 1; // convert 1-based UI → 0-based array
+        const toIdx   = toNum;       // slice end is exclusive, so toNum is correct
+
+        if (scanInProgress) { $status.css('color', '#ca3').text('⏳ Сканирование уже идёт…'); return; }
+
+        const $goBtn = $('#fmt_range_go');
+        $goBtn.prop('disabled', true).text('⏳ Анализ…');
+        $status.css('color', 'rgba(180,200,240,.6)').text(`Сканирую сообщения ${fromNum}–${toNum}…`);
+        scanInProgress = true;
+
+        try {
+          const added = await extractFacts(fromIdx, toIdx);
+          const state = await getChatState(true);
+          state.scanLog.unshift({ ts: Date.now(), added, from: fromIdx, to: toIdx, mode: 'range' });
+          if (state.scanLog.length > 20) state.scanLog.length = 20;
+
+          await c.saveMetadata();
+          await updateInjectedPrompt();
+          await renderWidget();
+          if ($('#fmt_drawer').hasClass('fmt-open')) await renderDrawer();
+
+          if (added === 0) {
+            $status.css('color', '#888').text('Новых фактов не найдено в этом диапазоне');
+          } else {
+            $status.css('color', '#70e8c0').text(`✅ Извлечено: ${added} фактов`);
+            toastr.success(`✅ Диапазон ${fromNum}–${toNum}: <b>${added}</b> фактов`, 'FMT', { timeOut: 5000, escapeHtml: false });
+          }
+        } catch (e) {
+          $status.css('color', '#ff7070').text(`❌ ${e.message}`);
+          toastr.error(`[FMT] ${e.message}`);
+        } finally {
+          scanInProgress = false;
+          $goBtn.prop('disabled', false).text('🔍 Сканировать диапазон');
+        }
+      });
+    }, 0);
+  }
+
   // ─── Injection ────────────────────────────────────────────────────────────────
 
   function buildInjectedBlock(state, settings) {
@@ -943,6 +1088,7 @@
 
         <div class="footer">
           <button type="button" id="fmt_scan_btn">🔍 Сканировать</button>
+          <button type="button" id="fmt_scan_range_btn" title="Выбрать диапазон сообщений для сканирования">🎯 Диапазон</button>
           <button type="button" id="fmt_flashback_btn" title="Случайный флешбек из фактов">⚡ Флешбек</button>
           <button type="button" id="fmt_export_btn">📤 Экспорт</button>
           <button type="button" id="fmt_import_btn">📥 Импорт</button>
@@ -965,6 +1111,7 @@
     $(document)
       .off('click.fmt_actions')
       .on('click.fmt_actions', '#fmt_scan_btn',        () => runScan('manual'))
+      .on('click.fmt_actions', '#fmt_scan_range_btn',  () => runScanRange())
       .on('click.fmt_actions', '#fmt_flashback_btn',   () => triggerFlashback())
       .on('click.fmt_actions', '#fmt_show_prompt_btn', () => showPromptPreview())
       .on('click.fmt_actions', '#fmt_recover_btn',     () => recoverFacts())
