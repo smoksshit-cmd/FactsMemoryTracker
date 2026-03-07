@@ -1,13 +1,12 @@
 /**
  * Facts Memory Tracker (FMT) — SillyTavern Extension
- * v1.3.3
+ * v1.3.4
  *
- * Fixes in v1.3.3:
- *  - ГЛАВНЫЙ ФИX: generateRaw теперь вызывается с quietToChat=TRUE →
- *    "No message generated" больше не появляется в чате при сканировании
- *  - Архитектура API переписана: ST — основной путь, кастовый API — опциональный
- *  - Понятные сообщения об ошибках с конкретными советами что проверить
- *  - Предыдущие фиксы v1.3.1 и v1.3.2 сохранены
+ * Changes in v1.3.4:
+ *  - exportJson: file download button + copy, no await before Popup (same fix as SRT)
+ *  - importJson: file picker button + textarea, same Popup timing fix
+ *  - getMessages(): filters out hidden/system messages, lorebook injections,
+ *    summarise entries — only real user↔char dialogue goes to the scan prompt
  */
 
 (() => {
@@ -206,16 +205,71 @@
     return common / Math.max(wa.size, wb.size);
   }
 
+  // ─── Download helper ──────────────────────────────────────────────────────────
+
+  function downloadJson(filename, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  }
+
   // ─── Chat helpers ─────────────────────────────────────────────────────────────
+
+  /**
+   * Returns the last `count` REAL dialogue messages starting from `from`.
+   *
+   * Filtered OUT (never go to scan prompt):
+   *  - is_system === true           → system / hidden messages inserted by ST
+   *  - extra.type === 'summarize'   → built-in ST summarization entries
+   *  - extra.isSmallSys             → small system injections
+   *  - extra.isHidden               → hidden messages (e.g. deleted but kept)
+   *  - extra.type === 'narrator'    → narrator / story-mode injections
+   *  - mes starts with '<|' or '[inst' → raw instruction tokens leaking into chat
+   *  - name contains '[' and ']'    → typical lorebook/WI injected pseudomessages
+   *  - mes is empty / whitespace only
+   */
+  function isRealDialogueMessage(m) {
+    if (!m) return false;
+    // Skip system/hidden flags
+    if (m.is_system)               return false;
+    if (m.extra?.isSmallSys)       return false;
+    if (m.extra?.isHidden)         return false;
+    // Skip summarization and narrator entries
+    const eType = m.extra?.type || '';
+    if (eType === 'summarize')     return false;
+    if (eType === 'narrator')      return false;
+    if (eType === 'chat_background') return false;
+    // Skip empty messages
+    const mes = (m.mes || '').trim();
+    if (!mes)                      return false;
+    // Skip raw instruction tokens that sometimes leak
+    if (mes.startsWith('<|') || mes.startsWith('[inst')) return false;
+    // Skip lorebook/WI pseudomessages — their "name" field is typically wrapped in brackets
+    const name = (m.name || '').trim();
+    if (name.startsWith('[') && name.endsWith(']')) return false;
+    return true;
+  }
 
   function getMessages(from, count) {
     const { chat } = ctx();
     if (!Array.isArray(chat) || !chat.length) return { text: '', lastIdx: 0 };
-    const slice = chat.slice(Math.max(0, from), from + count);
-    const text  = slice.map(m =>
+
+    // Collect real dialogue messages in the requested range
+    const slice = chat
+      .slice(Math.max(0, from), from + count)
+      .filter(isRealDialogueMessage);
+
+    const text = slice.map(m =>
       `${m.is_user ? '{{user}}' : (m.name || '{{char}}')}: ${(m.mes || '').trim()}`
     ).join('\n\n');
-    return { text, lastIdx: from + slice.length };
+
+    return { text, lastIdx: from + count };
   }
 
   function getCharacterCard() {
@@ -270,8 +324,6 @@
     throw new Error('Список моделей недоступен. Введи модель вручную.');
   }
 
-  // ─── БАГ 1 ИСПРАВЛЕН: testApiConnection теперь возвращает {url, builder} а не {url, body}
-  // Это позволяет сохранить рабочий конфиг с функцией builder, а не статичным body
   async function testApiConnection() {
     const s    = getSettings();
     const base = getBaseUrl();
@@ -309,7 +361,6 @@
               ?? data.choices?.[0]?.text
               ?? data.response
               ?? data.content;
-            // Возвращаем url + builder (функцию), а не body (объект)
             if (text !== undefined) return { url, builder };
           }
         } catch {}
@@ -320,20 +371,11 @@
 
   let _workingApiConfig = null;
 
-  // ─── Основная функция генерации ──────────────────────────────────────────────
-  //
-  // ЛОГИКА:
-  //  1. Если кастовый API настроен (endpoint задан) → пробуем его
-  //  2. Иначе → используем ST generateRaw (то что подключено в Chat Completion)
-  //
-  // ВАЖНО: generateRaw вызывается с quietToChat = TRUE чтобы ошибки не
-  // показывались в чате как "No message generated"
-  //
   async function aiGenerate(userPrompt, systemPrompt) {
     const s    = getSettings();
     const base = getBaseUrl();
 
-    // ── Путь 1: кастовый API (опционально) ───────────────────────────────────
+    // ── Path 1: custom API (optional) ────────────────────────────────────────
     if (base) {
       const apiKey = (s.apiKey || '').trim();
       const headers = {
@@ -341,16 +383,14 @@
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       };
 
-      // Используем запомненный рабочий конфиг если он есть
       if (_workingApiConfig?.base === base) {
         try {
           const result = await callApiWithConfig(_workingApiConfig, userPrompt, systemPrompt, headers);
           if (result?.trim()) return result;
         } catch {}
-        _workingApiConfig = null; // конфиг протух — сбрасываем
+        _workingApiConfig = null;
       }
 
-      // Перебираем эндпоинты и форматы
       const endpoints = [
         `${base}/v1/chat/completions`,
         `${base}/chat/completions`,
@@ -388,7 +428,6 @@
         }
       }
 
-      // Кастовый API не сработал
       const errSummary = errors.slice(-2).join(' | ');
       if (s.fallbackEnabled === false) {
         throw new Error(`Кастовый API не ответил: ${errSummary}`);
@@ -397,9 +436,7 @@
       toastr.warning('[FMT] Кастовый API недоступен — используется ST', '', { timeOut: 3000 });
     }
 
-    // ── Путь 2: ST generateRaw — основной способ ─────────────────────────────
-    // quietToChat = TRUE (4-й аргумент) — критично: без этого ST показывает
-    // "No message generated" прямо в интерфейсе чата при любой ошибке
+    // ── Path 2: ST generateRaw ────────────────────────────────────────────────
     const c = ctx();
     if (typeof c.generateRaw !== 'function') {
       throw new Error(
@@ -411,12 +448,12 @@
     let result;
     try {
       result = await c.generateRaw(
-        userPrompt,    // prompt
-        null,          // api — null = использовать текущий Chat Completion
-        false,         // instructOverride
-        true,          // quietToChat = TRUE — ошибки не показываются в чате !!
-        systemPrompt,  // system prompt
-        true           // quietToChat2 (дополнительный флаг в новых версиях ST)
+        userPrompt,
+        null,
+        false,
+        true,       // quietToChat = TRUE — ошибки не показываются в чате
+        systemPrompt,
+        true
       );
     } catch (e) {
       throw new Error(
@@ -484,18 +521,15 @@
 Если нет новых фактов — верни [].${existing}`;
   }
 
-  // Вытаскивает JSON-массив из ответа модели даже если она добавила текст вокруг него
   function parseFactsJson(raw) {
     if (!raw) return null;
 
-    // 1. Убираем markdown fence и пробуем прямой парсинг
     const clean = raw.replace(/```json|```/gi, '').trim();
     try {
       const p = JSON.parse(clean);
       if (Array.isArray(p)) return p;
     } catch {}
 
-    // 2. Ищем JSON-массив внутри текста (модель написала пояснение + JSON)
     const match = raw.match(/\[[\s\S]*?\]/);
     if (match) {
       try {
@@ -504,7 +538,6 @@
       } catch {}
     }
 
-    // 3. Ищем многострочный массив
     const matchMulti = raw.match(/\[[\s\S]+\]/);
     if (matchMulti) {
       try {
@@ -513,7 +546,7 @@
       } catch {}
     }
 
-    return null; // не смогли — возвращаем null, вызывающий обработает
+    return null;
   }
 
   async function extractFacts(fromIdx, toIdx) {
@@ -530,7 +563,6 @@
 
     const parsed = parseFactsJson(raw);
     if (!parsed) {
-      // Модель вернула не-JSON — логируем первые 200 символов для диагностики
       const preview = raw.slice(0, 200).replace(/\n/g, ' ');
       console.warn(`[FMT] Модель вернула не-JSON: «${preview}»`);
       throw new Error(
@@ -589,15 +621,13 @@
     }
   }
 
-  // ─── БАГ 2 ИСПРАВЛЕН: getChatState(true) вместо getChatState()
-  // Без true возвращался временный пустой объект — факты не попадали в chatMetadata
   async function detectFlashbackMarkers(messageText) {
     const s = getSettings();
     if (!s.autoMarker || !messageText) return;
     const matches = [...messageText.matchAll(FLASHBACK_MARKER_RE)];
     if (!matches.length) return;
 
-    const state = await getChatState(true); // ИСПРАВЛЕНО: true обязателен для сохранения
+    const state = await getChatState(true);
     const pool  = state.facts.map(f => f.text);
     const SIM   = 0.40;
     let changed = false;
@@ -627,8 +657,7 @@
 
     const settings = getSettings();
 
-    // Более надёжное получение чата — ctx().chat может быть undefined сразу после CHAT_CHANGED
-    const c = ctx();
+    const c    = ctx();
     const chat = c.chat ?? c.getChat?.() ?? [];
     if (!Array.isArray(chat) || !chat.length) {
       toastr.warning('[FMT] История чата пуста или ещё не загружена. Попробуй через секунду.');
@@ -728,7 +757,7 @@
     const btn = document.getElementById('fmt_fab_btn');
     if (!btn) return;
     const scale = getSettings().fabScale ?? 0.8;
-    btn.style.transform      = `scale(${scale})`;
+    btn.style.transform       = `scale(${scale})`;
     btn.style.transformOrigin = 'top left';
     const fab = document.getElementById('fmt_fab');
     if (fab) {
@@ -1021,10 +1050,9 @@
     }
   }
 
-  // ─── БАГ 4 ИСПРАВЛЕН: flashbacks добавлена в catOrder
   function sortFacts(facts) {
     const impOrder = { high: 2, medium: 1, low: 0 };
-    const catOrder = { characters: 0, events: 1, secrets: 2, flashbacks: 3 }; // ИСПРАВЛЕНО
+    const catOrder = { characters: 0, events: 1, secrets: 2, flashbacks: 3 };
     const mode = currentSortMode || 'date';
     const copy = [...facts];
     if (mode === 'importance')
@@ -1035,8 +1063,6 @@
       copy.sort((a, b) => (b.ts||0) - (a.ts||0));
     return copy;
   }
-
-  // ─── Render row ───────────────────────────────────────────────────────────────
 
   function renderFactRow(fact) {
     const catMeta = CATEGORIES[fact.category] || CATEGORIES.events;
@@ -1063,8 +1089,6 @@
         <button class="fmt-delete-btn" data-id="${fact.id}" title="Удалить">✕</button>
       </div>`;
   }
-
-  // ─── Render drawer ────────────────────────────────────────────────────────────
 
   async function renderDrawer() {
     ensureDrawer();
@@ -1296,36 +1320,129 @@
     toastr.success('Все факты удалены');
   }
 
-  // ─── Export / Import ──────────────────────────────────────────────────────────
+  // ─── Export ───────────────────────────────────────────────────────────────────
+  // BUG FIX (same as SRT): removed `await` before Popup.show.text() —
+  // the promise resolves when popup is CLOSED, so handlers must be attached
+  // via setTimeout(0) after the popup renders, not after await.
 
   async function exportJson() {
-    const state = await getChatState();
-    const json  = JSON.stringify(state, null, 2);
-    await ctx().Popup.show.text('FMT — Экспорт', `
-      <div style="margin-bottom:8px">
-        <button onclick="navigator.clipboard.writeText(document.getElementById('fmt_exp_ta').value).then(()=>toastr.success('Скопировано'))"
-          class="menu_button" style="padding:5px 14px">📋 Скопировать</button>
-      </div>
-      <textarea id="fmt_exp_ta" style="width:100%;height:52vh;font-size:11px;font-family:Consolas,monospace;background:#0a1220;color:#c8deff;border:1px solid rgba(100,160,255,0.25);border-radius:8px;padding:8px;box-sizing:border-box" readonly>${escHtml(json)}</textarea>`);
+    const state    = await getChatState();
+    const charName = getActiveCharName();
+    const ts       = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+    const filename = `fmt_${charName.replace(/[^a-zа-яёA-ZА-ЯЁ0-9]/gi, '_').slice(0, 30)}_${ts}.json`;
+    const json     = JSON.stringify(state, null, 2);
+    const total    = state.facts.length;
+
+    // ← NO await: promise resolves on popup close, not open
+    ctx().Popup.show.text('📤 FMT — Экспорт фактов',
+      `<div style="font-family:Consolas,monospace;font-size:12px">
+        <div style="margin-bottom:10px;opacity:.8">
+          Персонаж: <b>${escHtml(charName)}</b> · Фактов всего: <b>${total}</b>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <button id="fmt_export_download"
+            style="padding:8px 14px;background:rgba(80,180,140,0.15);border:1px solid rgba(80,180,140,0.5);color:#70e8c0;border-radius:8px;cursor:pointer;font-size:13px">
+            ⬇️ Скачать файл
+          </button>
+          <button id="fmt_export_copy"
+            style="padding:8px 14px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.2);color:#c8deff;border-radius:8px;cursor:pointer;font-size:13px">
+            📋 Скопировать JSON
+          </button>
+        </div>
+        <pre style="white-space:pre-wrap;max-height:50vh;overflow:auto;background:rgba(5,12,25,0.85);color:#c8deff;padding:10px;border-radius:8px;font-size:11px">${escHtml(json)}</pre>
+      </div>`
+    );
+
+    // Give the browser one tick to render popup DOM before attaching handlers
+    setTimeout(() => {
+      document.getElementById('fmt_export_download')?.addEventListener('click', () => {
+        downloadJson(filename, state);
+        toastr.success(`Файл "${filename}" сохранён`);
+      });
+      document.getElementById('fmt_export_copy')?.addEventListener('click', () => {
+        navigator.clipboard?.writeText(json).then(
+          () => toastr.success('JSON скопирован в буфер обмена'),
+          () => toastr.error('Не удалось скопировать — выдели текст вручную')
+        );
+      });
+    }, 0);
   }
 
+  // ─── Import ───────────────────────────────────────────────────────────────────
+  // Same fix: no await before Popup, handlers via setTimeout(0)
+
   async function importJson() {
-    const { Popup, saveMetadata, chatMetadata } = ctx();
-    const raw = await Popup.show.input('FMT — Импорт JSON', 'Вставьте JSON (экспорт из FMT):', '');
-    if (!raw) return;
-    try {
-      const p = JSON.parse(raw);
-      if (!p || typeof p !== 'object') throw new Error('Not an object');
-      p.facts               = Array.isArray(p.facts)   ? p.facts   : [];
-      p.lastScannedMsgIndex = p.lastScannedMsgIndex     || 0;
-      p.scanLog             = Array.isArray(p.scanLog)  ? p.scanLog : [];
-      chatMetadata[chatKey()] = p;
-      await saveMetadata();
-      await updateInjectedPrompt();
-      await renderDrawer();
-      await renderWidget();
-      toastr.success(`Импортировано ${p.facts.length} фактов`);
-    } catch (e) { toastr.error('[FMT] Неверный JSON: ' + e.message); }
+    // ← NO await
+    ctx().Popup.show.text('📥 FMT — Импорт фактов',
+      `<div style="font-family:Consolas,monospace;font-size:12px">
+        <div style="margin-bottom:10px;font-weight:700;opacity:.9">Загрузить из файла или вставить JSON:</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button id="fmt_import_file_btn"
+            style="padding:8px 14px;background:rgba(52,152,219,0.15);border:1px solid rgba(52,152,219,0.5);color:#5dade2;border-radius:8px;cursor:pointer;font-size:13px">
+            📁 Выбрать файл (.json)
+          </button>
+        </div>
+        <input type="file" id="fmt_import_file_input" accept=".json,application/json" style="display:none">
+        <textarea id="fmt_import_textarea"
+          placeholder="…или вставь JSON сюда вручную (экспорт из FMT)"
+          style="width:100%;height:140px;background:rgba(5,12,25,0.85);border:1px solid rgba(100,160,255,0.2);color:#c8deff;border-radius:8px;padding:8px;font-family:Consolas,monospace;font-size:11px;resize:vertical;box-sizing:border-box"></textarea>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="fmt_import_apply"
+            style="padding:8px 14px;background:rgba(80,180,140,0.15);border:1px solid rgba(80,180,140,0.5);color:#70e8c0;border-radius:8px;cursor:pointer;font-size:13px">
+            ⬆️ Применить JSON
+          </button>
+          <span id="fmt_import_status" style="font-size:11px;opacity:.75"></span>
+        </div>
+      </div>`
+    );
+
+    setTimeout(() => {
+      // File picker button
+      document.getElementById('fmt_import_file_btn')?.addEventListener('click', () => {
+        document.getElementById('fmt_import_file_input')?.click();
+      });
+
+      // Read selected file into textarea
+      document.getElementById('fmt_import_file_input')?.addEventListener('change', (ev) => {
+        const file = ev.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const ta = document.getElementById('fmt_import_textarea');
+          if (ta) ta.value = e.target.result;
+          const st = document.getElementById('fmt_import_status');
+          if (st) st.textContent = `📄 Загружен: ${file.name}`;
+        };
+        reader.onerror = () => toastr.error('Не удалось прочитать файл');
+        reader.readAsText(file);
+      });
+
+      // Apply JSON from textarea
+      document.getElementById('fmt_import_apply')?.addEventListener('click', async () => {
+        const raw = document.getElementById('fmt_import_textarea')?.value?.trim();
+        if (!raw) { toastr.warning('Вставьте JSON или выберите файл'); return; }
+        try {
+          const { saveMetadata, chatMetadata } = ctx();
+          const p = JSON.parse(raw);
+          if (!p || typeof p !== 'object') throw new Error('Not an object');
+          p.facts               = Array.isArray(p.facts)  ? p.facts  : [];
+          p.lastScannedMsgIndex = p.lastScannedMsgIndex   || 0;
+          p.scanLog             = Array.isArray(p.scanLog) ? p.scanLog : [];
+          chatMetadata[chatKey()] = p;
+          await saveMetadata();
+          await updateInjectedPrompt();
+          await renderDrawer();
+          await renderWidget();
+          toastr.success(`✅ Импортировано ${p.facts.length} фактов`);
+          const st = document.getElementById('fmt_import_status');
+          if (st) st.textContent = `✅ Готово (${p.facts.length} фактов)`;
+        } catch (e) {
+          toastr.error('[FMT] Неверный JSON: ' + e.message);
+          const st = document.getElementById('fmt_import_status');
+          if (st) st.textContent = `❌ ${e.message}`;
+        }
+      });
+    }, 0);
   }
 
   // ─── Prompt preview ───────────────────────────────────────────────────────────
@@ -1418,6 +1535,9 @@
         <label>Глубина:</label>
         <input type="range" id="fmt_scan_depth" min="10" max="200" step="10" value="${s.scanDepth}">
         <span id="fmt_scan_depth_val">${s.scanDepth}</span><span style="opacity:.5;font-size:10px">сообщ.</span>
+      </div>
+      <div style="font-size:10px;color:rgba(120,220,160,.55);margin-top:4px;line-height:1.5">
+        ⚠️ Скрытые сообщения, саммари и лорбуки автоматически исключаются из сканирования.
       </div>`;
 
     const secInject = `
@@ -1623,14 +1743,13 @@
       ctx().saveSettingsDebounced();
     });
 
-    // ─── БАГ 1 ИСПРАВЛЕН: сохраняем {base, url, builder} из testApiConnection
     $('#fmt_test_api').on('click', async () => {
       const $btn    = $('#fmt_test_api');
       const $status = $('#fmt_api_status');
       $btn.prop('disabled', true).text('⏳ Проверка…');
       $status.css('color', 'rgba(180,200,240,.5)').text('Перебираю эндпоинты…');
       try {
-        const cfg = await testApiConnection(); // возвращает {url, builder}
+        const cfg = await testApiConnection();
         _workingApiConfig = { base: getBaseUrl(), url: cfg.url, builder: cfg.builder };
         $status.css('color', '#70e8c0').text(`✅ Работает: ${cfg.url.replace(getBaseUrl(), '')}`);
         toastr.success('[FMT] API отвечает корректно');
@@ -1829,8 +1948,7 @@ ${catMeta.icon} «${fact.text}»
 
     eventSource.on(event_types.CHAT_CHANGED, async () => {
       msgSinceLastScan = 0;
-      scanInProgress = false; // сбрасываем на случай если предыдущий скан завис
-      // Небольшая задержка — chat[] заполняется асинхронно после события
+      scanInProgress = false;
       await new Promise(r => setTimeout(r, 300));
       await updateInjectedPrompt();
       await renderWidget();
@@ -1863,7 +1981,7 @@ ${catMeta.icon} «${fact.text}»
   // ─── Boot ─────────────────────────────────────────────────────────────────────
 
   jQuery(() => {
-    try { wireChatEvents(); console.log('[FMT] v1.3.3 loaded'); }
+    try { wireChatEvents(); console.log('[FMT] v1.3.4 loaded'); }
     catch (e) { console.error('[FMT] init failed', e); }
   });
 
