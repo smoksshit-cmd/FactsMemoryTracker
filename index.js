@@ -1,12 +1,14 @@
 /**
  * Facts Memory Tracker (FMT) — SillyTavern Extension
- * v1.3.4
+ * v2.0.0 — Full UI Redesign
  *
- * Changes in v1.3.4:
- *  - exportJson: file download button + copy, no await before Popup (same fix as SRT)
- *  - importJson: file picker button + textarea, same Popup timing fix
- *  - getMessages(): filters out hidden/system messages, lorebook injections,
- *    summarise entries — only real user↔char dialogue goes to the scan prompt
+ * Changes in v2.0.0:
+ *  - FAB: circle bubble with badge counter
+ *  - Drawer: slides from top center (modal-style)
+ *  - Facts: grid card layout (Trello/Pinterest style)
+ *  - Buttons: rounded pill buttons, nicer styling
+ *  - Settings: cleaner layout
+ *  - ALL logic preserved from v1.3.4
  */
 
 (() => {
@@ -16,7 +18,7 @@
 
   const MODULE_KEY  = 'facts_memory_tracker';
   const PROMPT_TAG  = 'FMT_FACTS_MEMORY';
-  const FAB_POS_KEY = 'fmt_fab_pos_v1';
+  const FAB_POS_KEY = 'fmt_fab_pos_v2';
   const FAB_MARGIN  = 8;
 
   const FACT_MARKER_RE      = /\[FACT:\s*([^\]|]+?)(?:\|\s*(characters|events|secrets|flashbacks))?\s*\]/gi;
@@ -62,7 +64,7 @@
     apiKey:           '',
     apiModel:         'gpt-4o-mini',
     collapsed:        false,
-    fabScale:         0.8,
+    fabScale:         1.0,
     autoMarker:       true,
     sortMode:         'date',
     fallbackEnabled:  true,
@@ -221,36 +223,18 @@
 
   // ─── Chat helpers ─────────────────────────────────────────────────────────────
 
-  /**
-   * Returns the last `count` REAL dialogue messages starting from `from`.
-   *
-   * Filtered OUT (never go to scan prompt):
-   *  - is_system === true           → system / hidden messages inserted by ST
-   *  - extra.type === 'summarize'   → built-in ST summarization entries
-   *  - extra.isSmallSys             → small system injections
-   *  - extra.isHidden               → hidden messages (e.g. deleted but kept)
-   *  - extra.type === 'narrator'    → narrator / story-mode injections
-   *  - mes starts with '<|' or '[inst' → raw instruction tokens leaking into chat
-   *  - name contains '[' and ']'    → typical lorebook/WI injected pseudomessages
-   *  - mes is empty / whitespace only
-   */
   function isRealDialogueMessage(m) {
     if (!m) return false;
-    // Skip system/hidden flags
     if (m.is_system)               return false;
     if (m.extra?.isSmallSys)       return false;
     if (m.extra?.isHidden)         return false;
-    // Skip summarization and narrator entries
     const eType = m.extra?.type || '';
     if (eType === 'summarize')     return false;
     if (eType === 'narrator')      return false;
     if (eType === 'chat_background') return false;
-    // Skip empty messages
     const mes = (m.mes || '').trim();
     if (!mes)                      return false;
-    // Skip raw instruction tokens that sometimes leak
     if (mes.startsWith('<|') || mes.startsWith('[inst')) return false;
-    // Skip lorebook/WI pseudomessages — their "name" field is typically wrapped in brackets
     const name = (m.name || '').trim();
     if (name.startsWith('[') && name.endsWith(']')) return false;
     return true;
@@ -260,7 +244,6 @@
     const { chat } = ctx();
     if (!Array.isArray(chat) || !chat.length) return { text: '', lastIdx: 0 };
 
-    // Collect real dialogue messages in the requested range
     const slice = chat
       .slice(Math.max(0, from), from + count)
       .filter(isRealDialogueMessage);
@@ -375,7 +358,7 @@
     const s    = getSettings();
     const base = getBaseUrl();
 
-    // ── Path 1: custom API (optional) ────────────────────────────────────────
+    // ── Path 1: custom API ───────────────────────────────────────────────────
     if (base) {
       const apiKey = (s.apiKey || '').trim();
       const headers = {
@@ -436,7 +419,7 @@
       toastr.warning('[FMT] Кастовый API недоступен — используется ST', '', { timeOut: 3000 });
     }
 
-    // ── Path 2: ST generateRaw ────────────────────────────────────────────────
+    // ── Path 2: ST generateRaw ──────────────────────────────────────────────
     const c = ctx();
     if (typeof c.generateRaw !== 'function') {
       throw new Error(
@@ -451,7 +434,7 @@
         userPrompt,
         null,
         false,
-        true,       // quietToChat = TRUE — ошибки не показываются в чате
+        true,
         systemPrompt,
         true
       );
@@ -698,7 +681,7 @@
       toastr.error(`[FMT] Ошибка: ${e.message}`);
     } finally {
       scanInProgress = false;
-      $btn.prop('disabled', false).text('🔍 Сканировать');
+      $btn.prop('disabled', false).text('🔍 Скан');
     }
   }
 
@@ -714,53 +697,52 @@
 
     const total = chat.length;
 
-    // No await — same Popup timing fix
     c.Popup.show.text('🎯 FMT — Сканировать диапазон',
-      `<div style="font-size:13px;color:#c8deff">
+      `<div style="font-size:13px;color:var(--SmartThemeBodyTextColor,#c8deff)">
         <div style="margin-bottom:12px;opacity:.75">
-          Всего сообщений в чате: <b style="color:#90b8f8">${total}</b><br>
+          Всего сообщений в чате: <b style="color:var(--SmartThemeQuoteColor,#90b8f8)">${total}</b><br>
           <span style="font-size:11px;opacity:.7">Нумерация с 1. Скрытые сообщения и саммари пропускаются автоматически.</span>
         </div>
         <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
           <div style="display:flex;flex-direction:column;gap:4px">
-            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">От сообщения №</label>
+            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">От №</label>
             <input id="fmt_range_from" type="number" min="1" max="${total}" value="1"
-              style="width:90px;padding:7px 10px;border-radius:8px;border:1px solid rgba(100,160,255,0.3);background:rgba(5,12,25,.9);color:#d8e8ff;font-size:14px;font-weight:700;text-align:center">
+              style="width:90px;padding:7px 10px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.3));background:var(--SmartThemeBlurTintColor,rgba(5,12,25,.9));color:var(--SmartThemeBodyTextColor,#d8e8ff);font-size:14px;font-weight:700;text-align:center">
           </div>
           <div style="font-size:20px;opacity:.4;padding-top:18px">→</div>
           <div style="display:flex;flex-direction:column;gap:4px">
-            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">До сообщения №</label>
+            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">До №</label>
             <input id="fmt_range_to" type="number" min="1" max="${total}" value="${total}"
-              style="width:90px;padding:7px 10px;border-radius:8px;border:1px solid rgba(100,160,255,0.3);background:rgba(5,12,25,.9);color:#d8e8ff;font-size:14px;font-weight:700;text-align:center">
+              style="width:90px;padding:7px 10px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.3));background:var(--SmartThemeBlurTintColor,rgba(5,12,25,.9));color:var(--SmartThemeBodyTextColor,#d8e8ff);font-size:14px;font-weight:700;text-align:center">
           </div>
           <div style="display:flex;flex-direction:column;gap:4px">
-            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">Сообщений</label>
+            <label style="font-size:11px;opacity:.65;text-transform:uppercase;letter-spacing:.05em">Всего</label>
             <div id="fmt_range_count"
-              style="width:56px;padding:7px 10px;border-radius:8px;border:1px solid rgba(100,160,255,0.1);background:rgba(100,160,255,0.06);color:#90b8f8;font-size:14px;font-weight:700;text-align:center">
+              style="width:56px;padding:7px 10px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.1));background:rgba(100,160,255,0.06);color:var(--SmartThemeQuoteColor,#90b8f8);font-size:14px;font-weight:700;text-align:center">
               ${total}
             </div>
           </div>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
           <button class="fmt-range-preset" data-preset="last50"
-            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            style="padding:5px 12px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.2));background:rgba(100,160,255,0.08);color:var(--SmartThemeQuoteColor,#90b8f8);cursor:pointer;font-size:11px">
             Последние 50
           </button>
           <button class="fmt-range-preset" data-preset="last100"
-            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            style="padding:5px 12px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.2));background:rgba(100,160,255,0.08);color:var(--SmartThemeQuoteColor,#90b8f8);cursor:pointer;font-size:11px">
             Последние 100
           </button>
           <button class="fmt-range-preset" data-preset="all"
-            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            style="padding:5px 12px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.2));background:rgba(100,160,255,0.08);color:var(--SmartThemeQuoteColor,#90b8f8);cursor:pointer;font-size:11px">
             Весь чат
           </button>
           <button class="fmt-range-preset" data-preset="first50"
-            style="padding:5px 10px;border-radius:6px;border:1px solid rgba(100,160,255,0.2);background:rgba(100,160,255,0.08);color:#90b8f8;cursor:pointer;font-size:11px">
+            style="padding:5px 12px;border-radius:20px;border:1px solid var(--SmartThemeBorderColor,rgba(100,160,255,0.2));background:rgba(100,160,255,0.08);color:var(--SmartThemeQuoteColor,#90b8f8);cursor:pointer;font-size:11px">
             Первые 50
           </button>
         </div>
         <button id="fmt_range_go"
-          style="width:100%;padding:10px;border-radius:8px;border:1px solid rgba(80,200,140,0.5);background:rgba(60,180,120,0.15);color:#70e8c0;cursor:pointer;font-size:13px;font-weight:700;margin-top:2px">
+          style="width:100%;padding:10px;border-radius:20px;border:1.5px solid rgba(80,200,140,0.5);background:rgba(60,180,120,0.12);color:#5cd8a4;cursor:pointer;font-size:13px;font-weight:700;margin-top:2px">
           🔍 Сканировать диапазон
         </button>
         <div id="fmt_range_status" style="margin-top:8px;font-size:11px;min-height:14px;text-align:center"></div>
@@ -778,13 +760,12 @@
         const t = parseInt($to.val())   || total;
         const n = Math.max(0, t - f + 1);
         $count.text(n);
-        $count.css('color', n > 0 ? '#90b8f8' : '#ff7070');
+        $count.css('color', n > 0 ? 'var(--SmartThemeQuoteColor,#90b8f8)' : '#ff7070');
       };
 
       $from.on('input', updateCount);
       $to.on('input',   updateCount);
 
-      // Preset buttons
       document.querySelectorAll('.fmt-range-preset').forEach(btn => {
         btn.addEventListener('click', () => {
           const preset = btn.getAttribute('data-preset');
@@ -809,8 +790,8 @@
           return;
         }
 
-        const fromIdx = fromNum - 1; // convert 1-based UI → 0-based array
-        const toIdx   = toNum;       // slice end is exclusive, so toNum is correct
+        const fromIdx = fromNum - 1;
+        const toIdx   = toNum;
 
         if (scanInProgress) { $status.css('color', '#ca3').text('⏳ Сканирование уже идёт…'); return; }
 
@@ -833,7 +814,7 @@
           if (added === 0) {
             $status.css('color', '#888').text('Новых фактов не найдено в этом диапазоне');
           } else {
-            $status.css('color', '#70e8c0').text(`✅ Извлечено: ${added} фактов`);
+            $status.css('color', '#5cd8a4').text(`✅ Извлечено: ${added} фактов`);
             toastr.success(`✅ Диапазон ${fromNum}–${toNum}: <b>${added}</b> фактов`, 'FMT', { timeOut: 5000, escapeHtml: false });
           }
         } catch (e) {
@@ -880,51 +861,45 @@
     setExtensionPrompt(PROMPT_TAG, buildInjectedBlock(state, s), s.position, s.depth, true);
   }
 
-  // ─── FAB ─────────────────────────────────────────────────────────────────────
+  // ─── FAB (circle bubble) ─────────────────────────────────────────────────────
 
   function vpW() { return window.visualViewport?.width  || window.innerWidth; }
   function vpH() { return window.visualViewport?.height || window.innerHeight; }
 
-  function getFabSize() {
-    const scale = getSettings().fabScale ?? 0.8;
-    return { W: Math.round(52 * scale) + 22, H: Math.round(48 * scale) + 6 };
-  }
+  const FAB_SIZE = 56; // circle diameter
 
   function clampFabPos(left, top) {
-    const { W, H } = getFabSize();
     return {
-      left: clamp(left, FAB_MARGIN, Math.max(FAB_MARGIN, vpW() - W - FAB_MARGIN)),
-      top:  clamp(top,  FAB_MARGIN, Math.max(FAB_MARGIN, vpH() - H - FAB_MARGIN)),
+      left: clamp(left, FAB_MARGIN, Math.max(FAB_MARGIN, vpW() - FAB_SIZE - FAB_MARGIN)),
+      top:  clamp(top,  FAB_MARGIN, Math.max(FAB_MARGIN, vpH() - FAB_SIZE - FAB_MARGIN)),
     };
   }
 
   function applyFabScale() {
     const btn = document.getElementById('fmt_fab_btn');
     if (!btn) return;
-    const scale = getSettings().fabScale ?? 0.8;
+    const scale = getSettings().fabScale ?? 1.0;
     btn.style.transform       = `scale(${scale})`;
-    btn.style.transformOrigin = 'top left';
+    btn.style.transformOrigin = 'center center';
     const fab = document.getElementById('fmt_fab');
     if (fab) {
-      fab.style.width  = Math.round(52 * scale) + 'px';
-      fab.style.height = Math.round(48 * scale) + 'px';
+      fab.style.width  = Math.round(FAB_SIZE * scale) + 'px';
+      fab.style.height = Math.round(FAB_SIZE * scale) + 'px';
     }
   }
 
   function applyFabPosition() {
     const el = document.getElementById('fmt_fab');
     if (!el) return;
-    el.style.transform = 'none';
     el.style.right = el.style.bottom = 'auto';
-    const { W, H } = getFabSize();
     try {
       const raw = localStorage.getItem(FAB_POS_KEY);
       if (!raw) { setFabDefault(); return; }
       const pos = JSON.parse(raw);
       let left, top;
       if (typeof pos.x === 'number') {
-        left = Math.round(pos.x * (vpW() - W - FAB_MARGIN * 2)) + FAB_MARGIN;
-        top  = Math.round(pos.y * (vpH() - H - FAB_MARGIN * 2)) + FAB_MARGIN;
+        left = Math.round(pos.x * (vpW() - FAB_SIZE - FAB_MARGIN * 2)) + FAB_MARGIN;
+        top  = Math.round(pos.y * (vpH() - FAB_SIZE - FAB_MARGIN * 2)) + FAB_MARGIN;
       } else if (typeof pos.left === 'number') {
         left = pos.left; top = pos.top;
       } else { setFabDefault(); return; }
@@ -935,10 +910,9 @@
   }
 
   function saveFabPosPx(left, top) {
-    const { W, H } = getFabSize();
     const c  = clampFabPos(left, top);
-    const rx = Math.max(1, vpW() - W - FAB_MARGIN * 2);
-    const ry = Math.max(1, vpH() - H - FAB_MARGIN * 2);
+    const rx = Math.max(1, vpW() - FAB_SIZE - FAB_MARGIN * 2);
+    const ry = Math.max(1, vpH() - FAB_SIZE - FAB_MARGIN * 2);
     try {
       localStorage.setItem(FAB_POS_KEY, JSON.stringify({
         x: clamp01((c.left - FAB_MARGIN) / rx), y: clamp01((c.top - FAB_MARGIN) / ry),
@@ -950,9 +924,8 @@
   function setFabDefault() {
     const el = document.getElementById('fmt_fab');
     if (!el) return;
-    const { W, H } = getFabSize();
-    const left = clamp(vpW() - W - FAB_MARGIN - 90, FAB_MARGIN, vpW() - W - FAB_MARGIN);
-    const top  = clamp(Math.round((vpH() - H) / 2) + 70, FAB_MARGIN, vpH() - H - FAB_MARGIN);
+    const left = clamp(vpW() - FAB_SIZE - FAB_MARGIN - 20, FAB_MARGIN, vpW() - FAB_SIZE - FAB_MARGIN);
+    const top  = clamp(Math.round((vpH() - FAB_SIZE) / 2), FAB_MARGIN, vpH() - FAB_SIZE - FAB_MARGIN);
     el.style.left = left + 'px'; el.style.top = top + 'px';
     saveFabPosPx(left, top);
   }
@@ -963,7 +936,8 @@
       <div id="fmt_fab">
         <button type="button" id="fmt_fab_btn" title="Открыть трекер фактов">
           <div>🧠</div>
-          <div class="fmt-mini"><span id="fmt_fab_count">0</span> фактов</div>
+          <span id="fmt_fab_count">0</span>
+          <div class="fmt-mini"></div>
         </button>
         <button type="button" id="fmt_fab_hide" title="Скрыть виджет">✕</button>
       </div>
@@ -1016,12 +990,11 @@
 
     handle.addEventListener('pointerdown', (ev) => {
       if (ev.pointerType === 'mouse' && ev.button !== 0) return;
-      const { W, H } = getFabSize();
-      const curL = parseInt(fab.style.left) || (vpW() - W - FAB_MARGIN - 90);
-      const curT = parseInt(fab.style.top)  || Math.round((vpH() - H) / 2);
+      const curL = parseInt(fab.style.left) || (vpW() - FAB_SIZE - FAB_MARGIN - 20);
+      const curT = parseInt(fab.style.top)  || Math.round((vpH() - FAB_SIZE) / 2);
       const p = clampFabPos(curL, curT);
       fab.style.left = p.left + 'px'; fab.style.top = p.top + 'px';
-      fab.style.right = fab.style.bottom = 'auto'; fab.style.transform = 'none';
+      fab.style.right = fab.style.bottom = 'auto';
       sx = ev.clientX; sy = ev.clientY; sl = p.left; st = p.top; moved = false;
       try { handle.setPointerCapture(ev.pointerId); } catch {}
       document.addEventListener('pointermove', onMove, { passive: false });
@@ -1049,7 +1022,7 @@
     $('#fmt_fab').show();
   }
 
-  // ─── Drawer ───────────────────────────────────────────────────────────────────
+  // ─── Drawer (top-slide modal) ─────────────────────────────────────────────────
 
   function ensureDrawer() {
     if ($('#fmt_drawer').length) return;
@@ -1057,7 +1030,7 @@
       <aside id="fmt_drawer" aria-hidden="true">
         <header>
           <div class="topline">
-            <div class="title">🧠 ПАМЯТЬ ФАКТОВ</div>
+            <div class="title">🧠 Память фактов</div>
             <button type="button" id="fmt_close" style="pointer-events:auto">✕</button>
           </div>
           <div class="sub" id="fmt_subtitle"></div>
@@ -1065,7 +1038,7 @@
         </header>
 
         <div class="fmt-toolbar">
-          <input type="text" id="fmt_search" placeholder="🔍 Поиск по тексту…" autocomplete="off">
+          <input type="text" id="fmt_search" placeholder="Поиск по фактам…" autocomplete="off">
           <select id="fmt_sort_select">
             ${Object.entries(SORT_MODES).map(([k,v]) => `<option value="${k}">${v}</option>`).join('')}
           </select>
@@ -1087,15 +1060,15 @@
         <div id="fmt_flash_panel" style="display:none"></div>
 
         <div class="footer">
-          <button type="button" id="fmt_scan_btn">🔍 Сканировать</button>
-          <button type="button" id="fmt_scan_range_btn" title="Выбрать диапазон сообщений для сканирования">🎯 Диапазон</button>
-          <button type="button" id="fmt_flashback_btn" title="Случайный флешбек из фактов">⚡ Флешбек</button>
-          <button type="button" id="fmt_export_btn">📤 Экспорт</button>
-          <button type="button" id="fmt_import_btn">📥 Импорт</button>
-          <button type="button" id="fmt_show_prompt_btn">Промпт</button>
-          <button type="button" id="fmt_scanlog_btn">📋 Лог</button>
-          <button type="button" id="fmt_recover_btn" title="Найти факты под другим ключом (если слетели)">🔄 Восстановить</button>
-          <button type="button" id="fmt_clear_btn" title="Очистить все факты">🗑️</button>
+          <button type="button" id="fmt_scan_btn">🔍 Скан</button>
+          <button type="button" id="fmt_scan_range_btn" title="Выбрать диапазон">🎯 Диапазон</button>
+          <button type="button" id="fmt_flashback_btn" title="Случайный флешбек">⚡ Флешбек</button>
+          <button type="button" id="fmt_export_btn" title="Экспорт">📤</button>
+          <button type="button" id="fmt_import_btn" title="Импорт">📥</button>
+          <button type="button" id="fmt_show_prompt_btn" title="Промпт">📝</button>
+          <button type="button" id="fmt_scanlog_btn" title="Лог сканирований">📋</button>
+          <button type="button" id="fmt_recover_btn" title="Восстановить факты">🔄</button>
+          <button type="button" id="fmt_clear_btn" title="Очистить все">🗑️</button>
           <button type="button" id="fmt_close2" style="pointer-events:auto">Закрыть</button>
         </div>
       </aside>
@@ -1171,7 +1144,7 @@
     });
   }
 
-  // ─── Open/close ───────────────────────────────────────────────────────────────
+  // ─── Open/close (top-slide) ───────────────────────────────────────────────────
 
   function openDrawer(open) {
     ensureDrawer();
@@ -1211,6 +1184,8 @@
     return copy;
   }
 
+  // ─── CARD layout for fact row ─────────────────────────────────────────────────
+
   function renderFactRow(fact) {
     const catMeta = CATEGORIES[fact.category] || CATEGORIES.events;
     const impMeta = IMPORTANCE[fact.importance] || IMPORTANCE.medium;
@@ -1226,14 +1201,18 @@
       <div class="fmt-fact-row${dis ? ' fmt-fact-disabled' : ''}"
            data-id="${fact.id}" data-cat="${fact.category}" data-imp="${fact.importance}"
            data-text="${escHtml(fact.text.toLowerCase())}">
-        <select class="fmt-inline-cat" data-id="${fact.id}" title="Изменить категорию">${catOpts}</select>
-        <span class="fmt-imp-dot" style="background:${impMeta.color}" title="${escHtml(impMeta.label)}"></span>
+        <div class="fmt-card-top">
+          <select class="fmt-inline-cat" data-id="${fact.id}" title="Категория">${catOpts}</select>
+          <span class="fmt-imp-dot" style="background:${impMeta.color}" title="${escHtml(impMeta.label)}"></span>
+          <select class="fmt-inline-imp" data-id="${fact.id}" title="Важность">${impOpts}</select>
+        </div>
         <span class="fmt-fact-text" data-id="${fact.id}" title="Кликни для редактирования">${escHtml(fact.text)}</span>
-        <span class="fmt-fact-date">${ts}</span>
-        <select class="fmt-inline-imp" data-id="${fact.id}" title="Изменить важность">${impOpts}</select>
-        <button class="fmt-flash-btn" data-id="${fact.id}" title="Использовать этот факт как флешбек">⚡</button>
-        <button class="fmt-toggle-btn" data-id="${fact.id}" title="${dis ? 'Включить' : 'Отключить'}">${dis ? '▶' : '⏸'}</button>
-        <button class="fmt-delete-btn" data-id="${fact.id}" title="Удалить">✕</button>
+        <div class="fmt-card-bottom">
+          <span class="fmt-fact-date">${ts}</span>
+          <button class="fmt-flash-btn" data-id="${fact.id}" title="Флешбек">⚡</button>
+          <button class="fmt-toggle-btn" data-id="${fact.id}" title="${dis ? 'Включить' : 'Отключить'}">${dis ? '▶' : '⏸'}</button>
+          <button class="fmt-delete-btn" data-id="${fact.id}" title="Удалить">✕</button>
+        </div>
       </div>`;
   }
 
@@ -1278,7 +1257,7 @@
       </div>`;
 
     if (total === 0) {
-      html += `<div class="fmt-empty">Фактов нет. Нажмите <b>🔍 Сканировать</b> — AI извлечёт важное из истории.</div>`;
+      html += `<div class="fmt-empty">Фактов пока нет.<br>Нажмите <b>🔍 Скан</b> — AI извлечёт важное из истории чата.</div>`;
     } else {
       for (const [cat, meta] of Object.entries(CATEGORIES)) {
         const items = grouped[cat];
@@ -1468,9 +1447,6 @@
   }
 
   // ─── Export ───────────────────────────────────────────────────────────────────
-  // BUG FIX (same as SRT): removed `await` before Popup.show.text() —
-  // the promise resolves when popup is CLOSED, so handlers must be attached
-  // via setTimeout(0) after the popup renders, not after await.
 
   async function exportJson() {
     const state    = await getChatState();
@@ -1480,27 +1456,25 @@
     const json     = JSON.stringify(state, null, 2);
     const total    = state.facts.length;
 
-    // ← NO await: promise resolves on popup close, not open
     ctx().Popup.show.text('📤 FMT — Экспорт фактов',
-      `<div style="font-family:Consolas,monospace;font-size:12px">
+      `<div style="font-family:inherit;font-size:13px">
         <div style="margin-bottom:10px;opacity:.8">
-          Персонаж: <b>${escHtml(charName)}</b> · Фактов всего: <b>${total}</b>
+          Персонаж: <b>${escHtml(charName)}</b> · Фактов: <b>${total}</b>
         </div>
         <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
           <button id="fmt_export_download"
-            style="padding:8px 14px;background:rgba(80,180,140,0.15);border:1px solid rgba(80,180,140,0.5);color:#70e8c0;border-radius:8px;cursor:pointer;font-size:13px">
-            ⬇️ Скачать файл
+            style="padding:8px 18px;background:rgba(80,180,140,0.12);border:1.5px solid rgba(80,180,140,0.5);color:#5cd8a4;border-radius:20px;cursor:pointer;font-size:13px;font-weight:600">
+            ⬇️ Скачать
           </button>
           <button id="fmt_export_copy"
-            style="padding:8px 14px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.2);color:#c8deff;border-radius:8px;cursor:pointer;font-size:13px">
-            📋 Скопировать JSON
+            style="padding:8px 18px;background:rgba(255,255,255,0.05);border:1.5px solid rgba(255,255,255,0.2);color:inherit;border-radius:20px;cursor:pointer;font-size:13px;font-weight:600">
+            📋 Копировать
           </button>
         </div>
-        <pre style="white-space:pre-wrap;max-height:50vh;overflow:auto;background:rgba(5,12,25,0.85);color:#c8deff;padding:10px;border-radius:8px;font-size:11px">${escHtml(json)}</pre>
+        <pre style="white-space:pre-wrap;max-height:50vh;overflow:auto;background:rgba(0,0,0,.25);color:inherit;padding:12px;border-radius:8px;font-size:11px;font-family:Consolas,monospace">${escHtml(json)}</pre>
       </div>`
     );
 
-    // Give the browser one tick to render popup DOM before attaching handlers
     setTimeout(() => {
       document.getElementById('fmt_export_download')?.addEventListener('click', () => {
         downloadJson(filename, state);
@@ -1516,27 +1490,25 @@
   }
 
   // ─── Import ───────────────────────────────────────────────────────────────────
-  // Same fix: no await before Popup, handlers via setTimeout(0)
 
   async function importJson() {
-    // ← NO await
     ctx().Popup.show.text('📥 FMT — Импорт фактов',
-      `<div style="font-family:Consolas,monospace;font-size:12px">
+      `<div style="font-family:inherit;font-size:13px">
         <div style="margin-bottom:10px;font-weight:700;opacity:.9">Загрузить из файла или вставить JSON:</div>
         <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
           <button id="fmt_import_file_btn"
-            style="padding:8px 14px;background:rgba(52,152,219,0.15);border:1px solid rgba(52,152,219,0.5);color:#5dade2;border-radius:8px;cursor:pointer;font-size:13px">
-            📁 Выбрать файл (.json)
+            style="padding:8px 18px;background:rgba(52,152,219,0.12);border:1.5px solid rgba(52,152,219,0.5);color:#5dade2;border-radius:20px;cursor:pointer;font-size:13px;font-weight:600">
+            📁 Выбрать файл
           </button>
         </div>
         <input type="file" id="fmt_import_file_input" accept=".json,application/json" style="display:none">
         <textarea id="fmt_import_textarea"
-          placeholder="…или вставь JSON сюда вручную (экспорт из FMT)"
-          style="width:100%;height:140px;background:rgba(5,12,25,0.85);border:1px solid rgba(100,160,255,0.2);color:#c8deff;border-radius:8px;padding:8px;font-family:Consolas,monospace;font-size:11px;resize:vertical;box-sizing:border-box"></textarea>
+          placeholder="…или вставь JSON сюда"
+          style="width:100%;height:140px;background:rgba(0,0,0,.2);border:1px solid rgba(100,160,255,0.2);color:inherit;border-radius:8px;padding:8px;font-family:Consolas,monospace;font-size:11px;resize:vertical;box-sizing:border-box"></textarea>
         <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
           <button id="fmt_import_apply"
-            style="padding:8px 14px;background:rgba(80,180,140,0.15);border:1px solid rgba(80,180,140,0.5);color:#70e8c0;border-radius:8px;cursor:pointer;font-size:13px">
-            ⬆️ Применить JSON
+            style="padding:8px 18px;background:rgba(80,180,140,0.12);border:1.5px solid rgba(80,180,140,0.5);color:#5cd8a4;border-radius:20px;cursor:pointer;font-size:13px;font-weight:600">
+            ⬆️ Применить
           </button>
           <span id="fmt_import_status" style="font-size:11px;opacity:.75"></span>
         </div>
@@ -1544,12 +1516,10 @@
     );
 
     setTimeout(() => {
-      // File picker button
       document.getElementById('fmt_import_file_btn')?.addEventListener('click', () => {
         document.getElementById('fmt_import_file_input')?.click();
       });
 
-      // Read selected file into textarea
       document.getElementById('fmt_import_file_input')?.addEventListener('change', (ev) => {
         const file = ev.target.files?.[0];
         if (!file) return;
@@ -1564,7 +1534,6 @@
         reader.readAsText(file);
       });
 
-      // Apply JSON from textarea
       document.getElementById('fmt_import_apply')?.addEventListener('click', async () => {
         const raw = document.getElementById('fmt_import_textarea')?.value?.trim();
         if (!raw) { toastr.warning('Вставьте JSON или выберите файл'); return; }
@@ -1601,7 +1570,7 @@
     const tokens   = estimateTokens(block);
     await ctx().Popup.show.text(
       `FMT — Промпт (~${tokens} токенов)`,
-      `<pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow:auto;font-family:Consolas,monospace;background:#0a1220;color:#c8deff;padding:12px;border-radius:8px">${escHtml(block)}</pre>`
+      `<pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow:auto;font-family:Consolas,monospace;background:rgba(0,0,0,.25);color:inherit;padding:12px;border-radius:8px">${escHtml(block)}</pre>`
     );
   }
 
@@ -1613,11 +1582,11 @@
     if (!log.length) { toastr.info('Лог сканирований пуст'); return; }
     const rows = log.map(e => {
       const d = new Date(e.ts).toLocaleString('ru-RU');
-      return `<tr><td style="padding:4px 10px">${d}</td><td>${e.mode||'manual'}</td><td>${e.from}–${e.to}</td><td><b style="color:${e.added>0?'#70e8c0':'#888'}">${e.added}</b></td></tr>`;
+      return `<tr><td style="padding:5px 10px">${d}</td><td>${e.mode||'manual'}</td><td>${e.from}–${e.to}</td><td><b style="color:${e.added>0?'#5cd8a4':'#888'}">${e.added}</b></td></tr>`;
     }).join('');
     await ctx().Popup.show.text('FMT — История сканирований', `
-      <table style="width:100%;border-collapse:collapse;font-size:12px;color:#c8deff">
-        <thead><tr style="color:#90b8f8;border-bottom:1px solid rgba(100,160,255,0.2)">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;color:inherit">
+        <thead><tr style="color:var(--SmartThemeQuoteColor,#90b8f8);border-bottom:1px solid rgba(100,160,255,0.2)">
           <th style="padding:6px 10px;text-align:left">Время</th>
           <th>Режим</th><th>Сообщения</th><th>Добавлено</th>
         </tr></thead>
@@ -1659,12 +1628,12 @@
       </div>
       <div class="fmt-srow fmt-slider-row">
         <label>Размер виджета:</label>
-        <input type="range" id="fmt_fab_scale" min="0.4" max="1.4" step="0.1" value="${s.fabScale??0.8}">
-        <span id="fmt_fab_scale_val">${Math.round((s.fabScale??0.8)*100)}%</span>
+        <input type="range" id="fmt_fab_scale" min="0.6" max="1.5" step="0.1" value="${s.fabScale??1.0}">
+        <span id="fmt_fab_scale_val">${Math.round((s.fabScale??1.0)*100)}%</span>
       </div>
       <div class="fmt-compact-btns">
-        <button class="menu_button" id="fmt_open_drawer_btn">📂 Открыть трекер</button>
-        <button class="menu_button" id="fmt_scan_settings_btn">🔍 Сканировать</button>
+        <button class="menu_button" id="fmt_open_drawer_btn">📂 Трекер</button>
+        <button class="menu_button" id="fmt_scan_settings_btn">🔍 Скан</button>
         <button class="menu_button" id="fmt_reset_pos_btn">↺ Позиция</button>
       </div>`;
 
@@ -1683,8 +1652,8 @@
         <input type="range" id="fmt_scan_depth" min="10" max="200" step="10" value="${s.scanDepth}">
         <span id="fmt_scan_depth_val">${s.scanDepth}</span><span style="opacity:.5;font-size:10px">сообщ.</span>
       </div>
-      <div style="font-size:10px;color:rgba(120,220,160,.55);margin-top:4px;line-height:1.5">
-        ⚠️ Скрытые сообщения, саммари и лорбуки автоматически исключаются из сканирования.
+      <div style="font-size:10px;color:var(--fmt-green);opacity:.55;margin-top:4px;line-height:1.5">
+        ⚠️ Скрытые сообщения, саммари и лорбуки исключаются из сканирования.
       </div>`;
 
     const secInject = `
@@ -1702,7 +1671,7 @@
         <span id="fmt_max_facts_val">${s.maxInjectFacts||30}</span>
       </div>
       <div style="margin-top:6px">
-        <div style="font-size:10px;color:rgba(180,200,240,.5);margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Шаблон промпта <code style="background:rgba(100,160,255,.1);padding:1px 4px;border-radius:3px">{{facts}}</code></div>
+        <div style="font-size:10px;color:var(--fmt-text-dim);margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em">Шаблон промпта <code style="background:var(--fmt-accent-dim);padding:1px 4px;border-radius:3px">{{facts}}</code></div>
         <textarea id="fmt_prompt_tpl" rows="3">${escHtml(s.promptTemplate||DEFAULT_PROMPT_TEMPLATE)}</textarea>
         <button class="menu_button" id="fmt_reset_tpl_btn" style="margin-top:3px;padding:3px 8px;font-size:10px">↩ Сброс</button>
       </div>`;
@@ -1717,12 +1686,12 @@
         <input type="range" id="fmt_flash_chance" min="0" max="30" step="1" value="${s.flashChance||0}">
         <span id="fmt_flash_chance_val">${s.flashChance||0}%</span>
       </div>
-      <div style="font-size:11px;color:rgba(180,200,240,.6);margin:4px 0 3px">Категории для флешбека:</div>
+      <div style="font-size:11px;color:var(--fmt-text-dim);margin:4px 0 3px">Категории для флешбека:</div>
       <div class="fmt-2col">
         ${Object.entries(CATEGORIES).map(([k,v])=>`
           <label class="fmt-ck"><input type="checkbox" class="fmt-flash-cat-cb" value="${k}" ${flashCats.includes(k)?'checked':''}><span>${v.icon} ${v.label}</span></label>`).join('')}
       </div>
-      <div style="font-size:10px;color:rgba(180,200,240,.4);margin-top:4px;line-height:1.5">
+      <div style="font-size:10px;color:var(--fmt-text-dim);margin-top:4px;line-height:1.5">
         Кнопка ⚡ в трекере — ручной запуск. Авто-шанс срабатывает на каждое сообщение юзера.
       </div>`;
 
@@ -1737,16 +1706,16 @@
       </div>
       <div id="fmt_mode_st" ${hasCustomApi?'style="display:none"':''}>
         <div class="fmt-api-st-info">
-          ✅ FMT использует модель которая сейчас подключена в SillyTavern.<br>
-          Никаких дополнительных настроек не нужно — всё работает из коробки.
+          ✅ FMT использует модель, подключённую в SillyTavern.<br>
+          Дополнительных настроек не нужно.
         </div>
       </div>
       <div id="fmt_mode_custom" ${!hasCustomApi?'style="display:none"':''}>
-        <div style="font-size:10px;color:rgba(100,220,160,.6);margin-bottom:7px;line-height:1.5">
-          Отдельный API для сканирования. Авто-перебор эндпоинтов и форматов.
+        <div style="font-size:10px;color:var(--fmt-green);opacity:.6;margin-bottom:7px;line-height:1.5">
+          Отдельный API для сканирования. Авто-перебор эндпоинтов.
         </div>
         <div class="fmt-2col" style="margin-bottom:6px">
-          <label class="fmt-ck"><input type="checkbox" id="fmt_fallback_enabled" ${s.fallbackEnabled!==false?'checked':''}><span>Fallback на ST если недоступен</span></label>
+          <label class="fmt-ck"><input type="checkbox" id="fmt_fallback_enabled" ${s.fallbackEnabled!==false?'checked':''}><span>Fallback на ST</span></label>
         </div>
         <input type="text" id="fmt_api_endpoint" class="fmt-api-field" placeholder="http://localhost:1234/v1 или https://api.openai.com" value="${escHtml(s.apiEndpoint||'')}">
         <div class="fmt-srow" style="gap:5px;margin-top:4px">
@@ -1755,12 +1724,12 @@
         </div>
         <div class="fmt-srow" style="gap:5px;margin-top:4px">
           <select id="fmt_api_model" class="fmt-api-select" style="flex:1">
-            ${s.apiModel?`<option value="${escHtml(s.apiModel)}" selected>${escHtml(s.apiModel)}</option>`:'<option value="">-- введи или загрузи 🔄 --</option>'}
+            ${s.apiModel?`<option value="${escHtml(s.apiModel)}" selected>${escHtml(s.apiModel)}</option>`:'<option value="">-- загрузи 🔄 --</option>'}
           </select>
           <button type="button" id="fmt_refresh_models" class="menu_button" style="padding:4px 8px;flex-shrink:0" title="Загрузить список моделей">🔄</button>
         </div>
         <div class="fmt-srow" style="gap:5px;margin-top:4px">
-          <input type="text" id="fmt_api_model_manual" class="fmt-api-field" placeholder="Или введи модель вручную (gpt-4o-mini, llama3 и т.д.)" value="${s.apiModel||''}" style="margin-bottom:0;flex:1">
+          <input type="text" id="fmt_api_model_manual" class="fmt-api-field" placeholder="Или введи модель вручную" value="${s.apiModel||''}" style="margin-bottom:0;flex:1">
         </div>
         <div class="fmt-srow" style="gap:5px;margin-top:6px">
           <button type="button" id="fmt_test_api" class="menu_button" style="flex:1;padding:5px 8px;font-size:11px">🔌 Тест соединения</button>
@@ -1853,7 +1822,7 @@
         s.apiEndpoint = ''; s.apiKey = '';
         _workingApiConfig = null;
         ctx().saveSettingsDebounced();
-        toastr.info('[FMT] Используется ST (текущая подключённая модель)', '', { timeOut: 2500 });
+        toastr.info('[FMT] Используется ST (текущая модель)', '', { timeOut: 2500 });
       } else {
         $('#fmt_mode_st').hide(); $('#fmt_mode_custom').show();
       }
@@ -1894,14 +1863,14 @@
       const $btn    = $('#fmt_test_api');
       const $status = $('#fmt_api_status');
       $btn.prop('disabled', true).text('⏳ Проверка…');
-      $status.css('color', 'rgba(180,200,240,.5)').text('Перебираю эндпоинты…');
+      $status.css('color', 'var(--fmt-text-dim)').text('Перебираю эндпоинты…');
       try {
         const cfg = await testApiConnection();
         _workingApiConfig = { base: getBaseUrl(), url: cfg.url, builder: cfg.builder };
-        $status.css('color', '#70e8c0').text(`✅ Работает: ${cfg.url.replace(getBaseUrl(), '')}`);
+        $status.css('color', 'var(--fmt-green)').text(`✅ Работает: ${cfg.url.replace(getBaseUrl(), '')}`);
         toastr.success('[FMT] API отвечает корректно');
       } catch (e) {
-        $status.css('color', '#ff7070').text(`❌ ${e.message}`);
+        $status.css('color', 'var(--fmt-red)').text(`❌ ${e.message}`);
         toastr.error('[FMT] ' + e.message);
       } finally {
         $btn.prop('disabled', false).text('🔌 Тест соединения');
@@ -2128,7 +2097,7 @@ ${catMeta.icon} «${fact.text}»
   // ─── Boot ─────────────────────────────────────────────────────────────────────
 
   jQuery(() => {
-    try { wireChatEvents(); console.log('[FMT] v1.3.4 loaded'); }
+    try { wireChatEvents(); console.log('[FMT] v2.0.0 loaded'); }
     catch (e) { console.error('[FMT] init failed', e); }
   });
 
